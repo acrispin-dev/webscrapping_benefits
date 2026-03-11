@@ -13,13 +13,34 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from bs4 import BeautifulSoup
 from scrapers.base import BaseScraper
 from scrapers.models import Promocion
-from scrapers.utils import extraer_comercio, extraer_comercio_de_condiciones
-from typing import List, Dict, Tuple
+from scrapers.utils import extraer_comercio
+from typing import List, Tuple
+import csv
+import os
 import re
 import time
+import difflib
 
 # Activar para ver logs detallados de cada paso del scraping
 DEBUG = True
+
+# ── Merchants desde comercios.csv para matching de logo-slug ─────────────────
+def _load_merchants() -> List[str]:
+    csv_path = os.path.join(os.path.dirname(__file__), 'comercios.csv')
+    try:
+        # Usar utf-8-sig para ignorar transparentemente el BOM (\xef\xbb\xbf)
+        with open(csv_path, newline='', encoding='utf-8-sig') as f:
+            return [r['companycd'].strip() for r in csv.DictReader(f)
+                    if r.get('companycd', '').strip()]
+    except Exception as e:
+        print(f"Error cargando comercios: {e}")
+        return []
+
+_MERCHANTS: List[str] = _load_merchants()
+# Precalcular versión normalizada (solo letras minúsculas) para matching rápido
+_MERCHANTS_NORM: List[Tuple[str, str]] = [
+    (re.sub(r'[^a-z]', '', m.lower()), m) for m in _MERCHANTS
+]
 
 
 def _dbg(msg: str) -> None:
@@ -42,16 +63,6 @@ _CATEGORIAS_KW = [
 # Valores del bloque discount que son puramente informativos (no precio real)
 _VALS_NO_PRECIO = {"descubre", "más info", "mas info", "ver más", "ver mas"}
 _BOTS_NO_PRECIO = {"más info", "mas info", "más aquí", "mas aqui", "ver más", "ver mas"}
-
-# Meses en español para parsing de fechas
-_MESES = {
-    'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
-    'mayo': '05', 'junio': '06', 'julio': '07', 'agosto': '08',
-    'septiembre': '09', 'octubre': '10', 'noviembre': '11', 'diciembre': '12',
-    'ene': '01', 'feb': '02', 'mar': '03', 'abr': '04',
-    'jun': '06', 'jul': '07', 'ago': '08', 'sep': '09', 'oct': '10',
-    'nov': '11', 'dic': '12',
-}
 
 
 class FalabellaScraper(BaseScraper):
@@ -78,97 +89,65 @@ class FalabellaScraper(BaseScraper):
             page = context.new_page()
             self._cargar_inicio(page)
 
-            # ── FASE 1: un único scroll continuo por el listado ───────────────
-            # Recogemos info básica + href de cada tarjeta mientras pasa por el
-            # viewport.  El listado NUNCA navega → el infinite scroll no se
-            # interrumpe y no hay límite artificial de ~45 tarjetas.
-            print(f"[{self.nombre}] Fase 1: recopilando tarjetas...")
+            # Único pase de scroll: captura las 151 tarjetas sin abrir pestañas extra.
+            print(f"[{self.nombre}] Recopilando tarjetas...")
             tarjetas = self._recopilar_todas_las_tarjetas(page)
-            print(f"[{self.nombre}] Fase 1 completada: {len(tarjetas)} tarjetas.")
-
-            # ── FASE 2: extraer texto legal abriendo cada detalle en nueva pestaña
-            print(f"[{self.nombre}] Fase 2: extrayendo detalles...")
-            promociones: List[Promocion] = []
-            for data_id_str, entry in sorted(tarjetas.items(), key=lambda x: int(x[0])):
-                info      = entry['info']
-                href      = entry['href']
-                data_id   = int(data_id_str)
-
-                print(f"[{self.nombre}] Detalle data-id={data_id}: {info.get('titulo','?')[:50]}")
-
-                fecha_inicio = ""
-                fecha_fin    = info.get('dias', '')
-                stock        = ""
-                condiciones  = ""
-                detail_url   = href or self.url_base
-                detail_soup  = None
-
-                if href and '/detalle/' in href:
-                    try:
-                        detail_pg = context.new_page()
-                        try:
-                            detail_pg.goto(href, wait_until="domcontentloaded",
-                                           timeout=30000)
-                            try:
-                                detail_pg.wait_for_selector(
-                                    '[class*="discounts-detail_legal-text"]',
-                                    timeout=10000
-                                )
-                            except PlaywrightTimeout:
-                                _dbg(f"data-id={data_id}: legal-text no apareció")
-                            detail_soup = BeautifulSoup(detail_pg.content(), "lxml")
-                            legal_el = detail_soup.select_one(
-                                '[class*="discounts-detail_legal-text"]'
-                            )
-                            condiciones = (legal_el.get_text(separator=" ", strip=True)
-                                           if legal_el else "")
-                            _dbg(f"data-id={data_id}: condiciones[0:120]= "
-                                 f"'{condiciones[:120]}'")
-                        finally:
-                            detail_pg.close()
-                    except Exception as e:
-                        print(f"[{self.nombre}]   ERROR detalle data-id={data_id}: "
-                              f"{type(e).__name__}: {e}")
-                else:
-                    _dbg(f"data-id={data_id}: sin href, saltando detalle")
-
-                f_ini, f_fin = _extraer_fechas(condiciones)
-                _dbg(f"data-id={data_id}: fechas → inicio='{f_ini}' fin='{f_fin}'")
-                if f_ini or f_fin:
-                    fecha_inicio = f_ini
-                    fecha_fin    = f_fin
-
-                if info['tipo'] != "% Descuento":
-                    stock = _extraer_stock_legal(condiciones)
-
-                # Refinar comercio: primero desde los elementos del detalle de la página
-                comercio = (
-                    (_extraer_comercio_detalle_page(detail_soup) if detail_soup else None)
-                    or extraer_comercio_de_condiciones(condiciones)
-                    or info.get('comercio', '')
-                )
-
-                promociones.append(Promocion(
-                    fuente=self.nombre,
-                    categoria=info['categoria'],
-                    comercio=comercio,
-                    titulo=info['titulo'],
-                    descripcion=info['descripcion'],
-                    precio=info['precio'],
-                    tipo=info['tipo'],
-                    fecha_inicio=fecha_inicio,
-                    fecha_fin=fecha_fin,
-                    stock=stock,
-                    url=detail_url,
-                    imagen_url=info['imagen_url'],
-                    condiciones=condiciones,
-                ))
+            print(f"[{self.nombre}] {len(tarjetas)} tarjetas recopiladas.")
 
             context.close()
             browser.close()
 
+        # Convertir a Promocion usando solo los datos de la card (sin visitar detalles)
+        promociones: List[Promocion] = []
+        for data_id_str, entry in sorted(tarjetas.items(), key=lambda x: int(x[0])):
+            info = entry['info']
+
+            # Comercio: logo slug → CSV  o fallback
+            logo_slug = info.get('logo_slug', '')
+            comercio = _comercio_desde_logo_slug(logo_slug)
+            
+            if not comercio:
+                comercio = info.get('comercio', '') # utils.extraer_comercio fallback
+                
+            if not comercio and logo_slug:
+                # Fallback como en el script de ejemplo
+                comercio = logo_slug.replace('_', ' ').replace('-', ' ').title()
+                
+            if not comercio:
+                comercio_final = "Falabella"
+            else:
+                comercio_final = _normalizar_comercio_final(comercio)
+
+            promociones.append(Promocion(
+                fuente=self.nombre,
+                categoria=info['categoria'],
+                comercio=comercio_final,
+                titulo=info['titulo'],
+                descripcion=info['descripcion'],
+                precio=info['precio'],
+                tipo=info['tipo'],
+                fecha_inicio="",
+                fecha_fin=info.get('dias', ''),
+                stock="",
+                url=self.url_base,
+                imagen_url=info['imagen_url'],
+                condiciones="",
+            ))
+
         print(f"[{self.nombre}] {len(promociones)} promociones procesadas.")
         return promociones
+
+    def _get_total_esperado(self, page) -> int:
+        """Lee la cantidad total de promos del encabezado de la página (ej. 'Todos (151)')."""
+        try:
+            el = page.query_selector('[class*="SectionTitle_heading"] small')
+            if el:
+                m = re.search(r'\d+', el.inner_text())
+                if m:
+                    return int(m.group(0))
+        except Exception:
+            pass
+        return 0
 
     def _recopilar_todas_las_tarjetas(self, page) -> dict:
         """
@@ -176,16 +155,18 @@ class FalabellaScraper(BaseScraper):
 
         Para cada card que aparezca en el DOM:
           - Parsea su info básica (título, precio, tipo, etc.)
-          - Extrae el href <a> para abrir el detalle después
+          - Construye el href usando el logo_slug si no se encuentra <a>
 
-        Usa scrollBy (relativo) desde posición 0 para no interrumpir el
-        infinite scroll. Para cuando el max data-id no sube en STABLE_STEPS
-        pasos → el servidor ya no tiene más tarjetas.
+        Se detiene cuando alcanza el total esperado (leído del encabezado)
+        O bien cuando el max data-id no sube en STABLE_STEPS pasos.
 
         Retorna dict: { 'data_id_str': {'info': {...}, 'href': '...'} }
         """
-        STABLE_STEPS = 20   # pasos sin nuevos cards → fin real (~7 s)
+        STABLE_STEPS = 40   # pasos sin nuevos cards → fin real (~14 s)
 
+        # Las cards de Falabella son <div data-id=...> sin <a> hijos;
+        # el JS_SNAPSHOT intenta capturar href de <a> como fallback por si
+        # en el futuro la web vuelve a usar anclas.
         JS_SNAPSHOT = """
             () => {
                 const result = {};
@@ -200,6 +181,12 @@ class FalabellaScraper(BaseScraper):
             }
         """
 
+        total_esperado = self._get_total_esperado(page)
+        if total_esperado:
+            print(f"[{self.nombre}] Total esperado desde la página: {total_esperado}")
+        else:
+            print(f"[{self.nombre}] WARN: no se pudo leer el total esperado; usando STABLE_STEPS={STABLE_STEPS}")
+
         tarjetas   = {}   # data_id_str → {'info': {}, 'href': ''}
         prev_max   = -1
         stable     = 0
@@ -213,13 +200,13 @@ class FalabellaScraper(BaseScraper):
             snapshot = page.evaluate(JS_SNAPSHOT)   # {id_str: href_str}
             for id_str, href in snapshot.items():
                 if id_str in tarjetas:
-                    # Actualizar href si antes estaba vacío
+                    # Actualizar href si antes estaba vacío (ej. <a> apareció tarde)
                     if not tarjetas[id_str]['href'] and href:
                         tarjetas[id_str]['href'] = href
                     continue
                 # Card nuevo: parsear su info
                 try:
-                    card_el  = page.query_selector(f'[data-id="{id_str}"]')
+                    card_el   = page.query_selector(f'[data-id="{id_str}"]')
                     card_html = card_el.inner_html() if card_el else ""
                     soup_card = BeautifulSoup(
                         f'<div class="card_root">{card_html}</div>', "lxml"
@@ -229,28 +216,40 @@ class FalabellaScraper(BaseScraper):
                     _dbg(f"recopilar data-id={id_str}: error parseando: {e}")
                     info = {}
                 if info:
+                    # Si el JS no encontró <a> (caso habitual en Falabella),
+                    # construir la URL de detalle desde el logo_slug.
+                    if not href and info.get('logo_slug'):
+                        href = f"{self.url_base}/{info['logo_slug']}"
                     tarjetas[id_str] = {'info': info, 'href': href}
                     _dbg(f"recopilar: guardado data-id={id_str} "
                          f"href={'OK' if href else 'VACIO'} "
                          f"titulo='{info.get('titulo','?')[:40]}'")
 
-            # Calcular max_id y decidir si seguimos
-            max_id = max((int(k) for k in tarjetas if k.isdigit()), default=-1)
-            if max_id > prev_max:
-                _dbg(f"recopilar step#{step}: max_id subió {prev_max}→{max_id} "
-                     f"(total={len(tarjetas)})")
-                prev_max = max_id
+            # ── Condición de parada: total alcanzado ─────────────────────────
+            if total_esperado and len(tarjetas) >= total_esperado:
+                _dbg(f"recopilar: FIN — alcanzado total esperado ({len(tarjetas)}/{total_esperado})")
+                break
+
+            # Validar si creció la cantidad de tarjetas recopiladas
+            current_count = len(tarjetas)
+            if current_count > prev_max:
+                _dbg(f"recopilar step#{step}: tarjetas subió {prev_max}→{current_count}")
+                prev_max = current_count
                 stable   = 0
             else:
                 stable += 1
-                _dbg(f"recopilar step#{step}: max_id={max_id} estable "
-                     f"({stable}/{STABLE_STEPS}, total={len(tarjetas)})")
+                _dbg(f"recopilar step#{step}: conteo={current_count} estable "
+                     f"({stable}/{STABLE_STEPS})")
                 if stable >= STABLE_STEPS:
-                    _dbg(f"recopilar: FIN REAL — max_id={max_id}")
+                    _dbg(f"recopilar: FIN REAL — conteo final={current_count}")
                     break
 
-            page.evaluate("window.scrollBy(0, window.innerHeight)")
-            time.sleep(0.35)
+            page.evaluate("""
+                window.scrollTo(0, document.documentElement.scrollHeight);
+                var nextDiv = document.getElementById('__next');
+                if(nextDiv) { nextDiv.scrollTop = nextDiv.scrollHeight; }
+            """)
+            time.sleep(0.5)
             step += 1
 
         return tarjetas
@@ -320,6 +319,31 @@ class FalabellaScraper(BaseScraper):
                 badge.decompose()
         dias = time_el.get_text(strip=True) if time_el else ""
 
+        # Logica del script de ejemplo para la extracción del comercio (título/logo)
+        logo_el = soup.find('img', class_=lambda c: c and ('NewCardBenefits_logo' in c or 'partner-logo' in c))
+        img_url = ""
+        logo_slug = ""
+        alt_text = ""
+        if logo_el:
+            img_url = logo_el.get('srcset', '') or logo_el.get('src', '')
+            alt_text = logo_el.get('alt', '')
+            
+            # regex mejorada desde el script de ejemplo (soporta logo_ o card_logo_)
+            m_slug = re.search(r'(?:card_)?logo_([^\.]+)', img_url)
+            if m_slug:
+                raw_name = m_slug.group(1)
+                if '?' in raw_name:
+                    raw_name = raw_name.split('?')[0]
+                logo_slug = raw_name
+            else:
+                if alt_text.startswith('logo-'):
+                    logo_slug = alt_text.replace('logo-', '').strip()
+                elif len(alt_text) < 50:
+                    logo_slug = alt_text.strip()
+                    
+        if logo_slug:
+            _dbg(f"_parsear_card_soup: logo_slug='{logo_slug}'")
+
         categoria = _inferir_categoria(titulo + " " + descripcion)
 
         return {
@@ -330,11 +354,85 @@ class FalabellaScraper(BaseScraper):
             'imagen_url': img_url,
             'categoria': categoria,
             'comercio': extraer_comercio(titulo, descripcion),
+            'logo_slug': logo_slug,
             'dias': dias,
         }
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _normalizar_comercio_final(nombre_crudo: str) -> str:
+    """Intenta emparejar el nombre extraído con la lista maestra en CSV usando similitud."""
+    if not nombre_crudo or not _MERCHANTS:
+        return nombre_crudo
+
+    crudo_clean = nombre_crudo.strip()
+    crudo_lower = crudo_clean.lower()
+    
+    # 1. Match exacto case-insensitive
+    for m in _MERCHANTS:
+        if m.lower() == crudo_lower:
+            return m
+            
+    # 2. Match parcial fuerte: si el nombre del comercio (del CSV) está contenido en el crudo
+    # Ej: "kfc_familiar" -> "KFC", "burger_king_promo" -> "Burger King"
+    # Ordenamos por longitud de mayor a menor para buscar primero los nombres más específicos
+    for m in sorted(_MERCHANTS, key=len, reverse=True):
+        m_lower = m.lower()
+        if len(m_lower) >= 3 and m_lower in crudo_lower:
+            return m
+            
+    # 3. Match parcial inverso: si la palabra cruda está contenida en el comercio (CSV)
+    # Ej: "bembos" in "Bembos Peru"
+    for m in _MERCHANTS:
+        m_lower = m.lower()
+        if len(crudo_lower) >= 4 and crudo_lower in m_lower:
+            return m
+            
+    # 4. Búsqueda de similitud estricta con difflib (para typos: "Burguer King" -> "Burger King")
+    nombres_csv_lower = {m.lower(): m for m in _MERCHANTS}
+    matches = difflib.get_close_matches(crudo_lower, list(nombres_csv_lower.keys()), n=1, cutoff=0.7)
+    
+    if matches:
+        return nombres_csv_lower[matches[0]]
+
+    # Si todo falla, normalizamos estéticamente la salida reemplazando _ o - por espacios
+    crudo_clean = crudo_clean.replace('_', ' ').replace('-', ' ').title()
+    return crudo_clean
+
+def _comercio_desde_logo_slug(slug: str) -> str:
+    """
+    Dado un slug extraído del src del logo (ej. 'repsoldto3'), lo normaliza
+    (sólo letras, sin dígitos al final) y busca el mejor match en _MERCHANTS.
+
+    Estrategia: el slug suele comenzar con el nombre del comercio seguido de
+    una abreviatura de la oferta (ej. 'dto3', '25off', etc.).
+    Retorna el nombre canónico del CSV o '' si no hay coincidencia suficiente.
+    """
+    if not slug or not _MERCHANTS_NORM:
+        return ""
+
+    # Normalizar slug: minúsculas, quitar dígitos del final, solo letras
+    slug_norm = re.sub(r'\d+$', '', slug.lower())
+    slug_norm = re.sub(r'[^a-z]', '', slug_norm)
+
+    if len(slug_norm) < 3:
+        return ""
+
+    best_name  = ""
+    best_score = 0
+    for m_norm, m_name in _MERCHANTS_NORM:
+        if not m_norm or len(m_norm) < 3:
+            continue
+        # El slug empieza con el nombre del comercio O coincide exactamente
+        if slug_norm.startswith(m_norm) or m_norm == slug_norm:
+            score = len(m_norm)
+            if score > best_score:
+                best_score = score
+                best_name  = m_name
+
+    return best_name if best_score >= 3 else ""
+
 
 def _inferir_categoria(texto: str) -> str:
     """Infiere la categoría a partir de palabras clave en título + descripción."""
@@ -397,166 +495,3 @@ def clasificar_valor(val: str, etiqueta: str, top: str = "") -> Tuple[str, str]:
         return val, "Precio promo"
 
     return val, "Beneficio"
-
-
-def _extraer_fechas(texto: str) -> Tuple[str, str]:
-    """
-    Extrae (fecha_inicio, fecha_fin) del texto legal de Falabella.
-
-    Patrones soportados:
-      "del 01/03/2026 al 31/03/2026"
-      "del 15 de agosto [de 2026] al 31 de diciembre [de 2026]"
-      "hasta el 31/03/2026"
-      "hasta el 31 de diciembre [de 2026]"
-    """
-    meses = (r'(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|'
-             r'septiembre|octubre|noviembre|diciembre|'
-             r'ene|feb|mar|abr|jun|jul|ago|sep|oct|nov|dic)')
-    pat_esfecha = rf'\d{{1,2}}\s+(?:de\s+)?{meses}(?:\s+(?:de\s+)?\d{{4}})?'
-
-    # dd/mm/yyyy al dd/mm/yyyy
-    m = re.search(r'(\d{1,2}/\d{1,2}/\d{4})\s+al\s+(\d{1,2}/\d{1,2}/\d{4})',
-                  texto, re.IGNORECASE)
-    if m:
-        return m.group(1), m.group(2)
-
-    # del dd de mes [de yyyy] al dd de mes [de yyyy]
-    m = re.search(
-        rf'(?:del?\s+)({pat_esfecha})\s+al\s+({pat_esfecha})',
-        texto, re.IGNORECASE
-    )
-    if m:
-        return _norm_fecha_es(m.group(1)), _norm_fecha_es(m.group(2))
-
-    # hasta el dd/mm/yyyy
-    m = re.search(r'hasta\s+(?:el\s+|la\s+)?(\d{1,2}/\d{1,2}/\d{4})',
-                  texto, re.IGNORECASE)
-    if m:
-        return "", m.group(1)
-
-    # hasta el dd de mes [de yyyy]
-    m = re.search(rf'hasta\s+(?:el\s+|la\s+)?({pat_esfecha})',
-                  texto, re.IGNORECASE)
-    if m:
-        return "", _norm_fecha_es(m.group(1))
-
-    return "", ""
-
-
-def _norm_fecha_es(fecha_str: str) -> str:
-    """Normaliza '15 de agosto de 2026' → '15/08/2026' o '15 agosto' → '15/08'."""
-    s = fecha_str.strip()
-    m = re.match(r'(\d{1,2})\s+(?:de\s+)?(\w+)(?:\s+(?:de\s+)?(\d{4}))?',
-                 s, re.IGNORECASE)
-    if m:
-        dia = m.group(1).zfill(2)
-        mes_n = m.group(2).lower()
-        anio = m.group(3) or ""
-        mes_num = _MESES.get(mes_n, mes_n)
-        return f"{dia}/{mes_num}/{anio}" if anio else f"{dia}/{mes_num}"
-    return s
-
-
-def _extraer_stock_legal(texto: str) -> str:
-    """
-    Extrae información de stock del texto legal de una promoción de precio/beneficio.
-
-    - "Stock mínimo 1000 unidades"      → "Stock mínimo 1000 unidades"
-    - "Sujeto a disponibilidad de stock" (sin número) → "Sujeto a disponibilidad"
-    - Sin mención de stock              → ""
-    """
-    t = texto.lower()
-
-    # Stock con número explícito: "stock mínimo 500 unidades", "stock: 1000"
-    m = re.search(
-        r'stock\s+(?:mínimo|minimo|máximo|maximo|de\s+|disponible\s+)?'
-        r':?\s*(\d[\d,.]*)\s*(?:unidades?|und\.?|piezas?|cupos?|productos?)?',
-        t
-    )
-    if m:
-        start = t.index(m.group(0))
-        return texto[start: start + len(m.group(0))].strip()
-
-    # Número de unidades en el texto aunque no diga "stock" antes
-    m = re.search(r'(\d[\d,.]+)\s+(?:unidades?|cupos?)', t)
-    if m:
-        start = t.index(m.group(0))
-        return texto[start: start + len(m.group(0))].strip()
-
-    # Mención de stock sin número → sujeto a disponibilidad
-    if re.search(
-        r'sujeto\s+a\s+disponibilidad.*?stock|'
-        r'hasta\s+agotar\s+(?:el\s+)?stock|'
-        r'sujeto\s+a\s+stock',
-        t
-    ):
-        return "Sujeto a disponibilidad"
-
-    return ""
-
-
-def _extraer_comercio_detalle_page(detail_soup: BeautifulSoup) -> str:
-    """
-    Extrae el nombre del comercio desde la página de detalle de Falabella usando:
-      1. CardInfo_title → <h1><b>Disfruta de tu promoción en Burger King</b></h1>
-      2. DetailBanner_wrapper-content → <li><p>Acércate a tu local de Burger King...</p></li>
-
-    Estrategia:
-      a) Busca marcas conocidas (_COMERCIOS_KW) en el texto combinado.
-      b) Regex: "en NombreComercio" al final del título de la card.
-      c) Regex: "tu local de NombreComercio" en los ítems del banner.
-    """
-    texts: list = []
-
-    title_el = detail_soup.select_one('[class*="CardInfo_title"]')
-    if title_el:
-        texts.append(title_el.get_text(strip=True))
-
-    banner_el = detail_soup.select_one('[class*="DetailBanner_wrapper-content"]')
-    if banner_el:
-        for p_el in banner_el.select('li p')[:6]:
-            t = p_el.get_text(strip=True)
-            if t:
-                texts.append(t)
-
-    if not texts:
-        return ""
-
-    combined = " ".join(texts)
-
-    # Intento 1: marcas conocidas (captura KFC, Burger King, etc.)
-    kw = extraer_comercio(combined)
-    if kw:
-        return kw
-
-    # Intento 2: "en NombreComercio" al final el título de la card
-    # e.g. "Disfruta de tu promoción en Burguer King"
-    if texts:
-        m = re.search(
-            r'\ben\s+'
-            r'((?:[A-Z\u00C0-\u00DC][A-Za-z\u00C0-\u00FF&\'\-\w]+)'
-            r'(?:\s+[A-Z\u00C0-\u00DC&][\w\'\-]+){0,4})'
-            r'\s*$',
-            texts[0]
-        )
-        if m:
-            return m.group(1).strip()
-
-    # Intento 3: "tu local de NombreComercio" en los ítems del banner
-    for text in texts[1:]:
-        m = re.search(
-            r'\btu\s+local\s+de\s+'
-            r'((?:[A-Z\u00C0-\u00DC][A-Za-z\u00C0-\u00FF&\'\-\w]+)'
-            r'(?:\s+[A-Z\u00C0-\u00DC&][\w\'\-]+){0,4})',
-            text
-        )
-        if m:
-            name = m.group(1).strip()
-            name = re.sub(
-                r'\s+(?:favorito|cercano|participante)[\w\s]*$', '',
-                name, flags=re.IGNORECASE
-            ).strip()
-            if name:
-                return name
-
-    return ""
