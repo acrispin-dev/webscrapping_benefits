@@ -3,6 +3,7 @@ Scraper para Movistar PerÃº â€” Club Movistar
 URL: https://www.movistar.com.pe/club-movistar
 """
 import requests
+import re
 from bs4 import BeautifulSoup
 from scrapers.base import BaseScraper
 from scrapers.models import Promocion
@@ -27,6 +28,7 @@ class MovistarScraper(BaseScraper):
         try:
             resp = requests.get(self.url_base, headers=headers, timeout=30)
             resp.raise_for_status()
+            resp.encoding = 'utf-8'  # Asegurar decodificación correcta
             html = resp.text
         except Exception as e:
             print(f"[{self.nombre}] Error cargando HTML: {e}")
@@ -49,32 +51,37 @@ class MovistarScraper(BaseScraper):
             return self._parsear_fallback(soup)
 
         for tarjeta in tarjetas:
-            title_el = tarjeta.select_one('.stefa-tabs-club-movistar__card--body__title, h2, h3, [class*="title"]')
-            desc_el = tarjeta.select_one('.stefa-tabs-club-movistar__card--body__text, p, [class*="text"]')
+            comercio_el = tarjeta.select_one('.stefa-tabs-club-movistar__card--body__title, h2, h3, [class*="title"]')
+            titulo_el = tarjeta.select_one('.stefa-tabs-club-movistar__card--body__text, p:not(.stefa-tabs-club-movistar__card--body__title)')
             badge_el = tarjeta.select_one('.stefa-tabs-club-movistar__card--header__bagde, [class*="discount"]')
             img_el = tarjeta.select_one('img')
             
-            titulo = title_el.get_text(strip=True) if title_el else ""
-            descripcion = desc_el.get_text(strip=True) if desc_el else ""
-            descuento = badge_el.get_text(strip=True) if badge_el else ""
+            comercio = re.sub(r'\s+', ' ', comercio_el.get_text(separator=' ', strip=True)) if comercio_el else ""
+            descripcion = re.sub(r'\s+', ' ', titulo_el.get_text(separator=' ', strip=True)) if titulo_el else ""
+            descuento = re.sub(r'\s+', ' ', badge_el.get_text(separator=' ', strip=True)) if badge_el else ""
+            
+            # En Movistar el texto descriptivo funciona mucho mejor como título de la promo:
+            titulo = descripcion if descripcion else comercio
             
             img_url = img_el.get('src') or img_el.get('data-src') or "" if img_el else ""
             if img_url and img_url.startswith("//"):
                 img_url = "https:" + img_url
                 
-            texto_completo = f"{titulo} {descripcion} {descuento}"
+            texto_completo = f"{titulo} {comercio} {descuento}"
             precio, tipo = extraer_precio_tipo_de_texto(texto_completo)
-            stock = extraer_stock(texto_completo)
+                
+            # Movistar no publica fechas ni stock en su web publica
+            fecha_inicio = ""
+            fecha_fin_d = ""
+            stock = "Stock no disponible"
             
-            fecha_inicio, fecha_fin_d = extraer_fechas(texto_completo)
-            
-            if titulo:
+            if comercio or titulo:
                 promociones.append(Promocion(
                     fuente=self.nombre,
                     categoria="Club Movistar",
                     titulo=titulo,
                     descripcion=descripcion,
-                    comercio=extraer_comercio(titulo, descripcion),
+                    comercio=comercio if comercio else extraer_comercio(titulo, descripcion),
                     precio=precio,
                     tipo=tipo,
                     fecha_inicio=fecha_inicio,
@@ -105,11 +112,11 @@ class MovistarScraper(BaseScraper):
                 break
 
         for tarjeta in tarjetas:
-            titulo = self._texto(tarjeta, ["h2", "h3", "h4", "[class*='title']", "[class*='name']"])
-            descripcion = self._texto(tarjeta, ["p", "[class*='desc']", "[class*='text']"])
-            descuento = self._texto(tarjeta, ["[class*='discount']", "[class*='benefit']", "strong", "b"])
-            categoria = self._texto(tarjeta, ["[class*='categ']", "[class*='tag']", "[class*='type']"])
-            fecha = self._texto(tarjeta, ["[class*='date']", "[class*='valid']", "[class*='vigencia']", "time"])
+            comercio = re.sub(r'\s+', ' ', self._texto(tarjeta, ["h2", "h3", "h4", "[class*='title']", "[class*='name']"]))
+            descripcion = re.sub(r'\s+', ' ', self._texto(tarjeta, ["[class*='text']", "[class*='desc']", "p:not([class*='title'])", "p"]))
+            descuento = re.sub(r'\s+', ' ', self._texto(tarjeta, ["[class*='discount']", "[class*='benefit']", "strong", "b"]))
+            categoria = re.sub(r'\s+', ' ', self._texto(tarjeta, ["[class*='categ']", "[class*='tag']", "[class*='type']"]))
+            fecha = re.sub(r'\s+', ' ', self._texto(tarjeta, ["[class*='date']", "[class*='valid']", "[class*='vigencia']", "time"]))
             imagen = tarjeta.select_one("img")
             img_url = imagen.get("src", "") or imagen.get("data-src", "") if imagen else ""
             if img_url and img_url.startswith("//"):
@@ -119,18 +126,23 @@ class MovistarScraper(BaseScraper):
             if href and href.startswith("/"):
                 href = "https://www.movistar.com.pe" + href
 
-            texto_completo = f"{titulo} {descripcion} {descuento}"
-            precio, tipo = extraer_precio_tipo_de_texto(texto_completo)
-            stock = extraer_stock(texto_completo)
-            fecha_inicio, fecha_fin_d = extraer_fechas(fecha)
+            titulo = descripcion if descripcion else comercio
 
-            if titulo:
+            texto_completo = f"{titulo} {comercio} {descuento}"
+            precio, tipo = extraer_precio_tipo_de_texto(texto_completo)
+            
+            # Movistar no publica fechas ni stock en su web publica
+            fecha_inicio = ""
+            fecha_fin_d = ""
+            stock = "Stock no disponible"
+
+            if comercio or titulo:
                 promociones.append(Promocion(
                     fuente=self.nombre,
                     categoria=categoria or "Club Movistar",
-                    titulo=titulo or "Sin tÃtulo",
+                    titulo=titulo or "Sin título",
                     descripcion=descripcion or "",
-                    comercio=extraer_comercio(titulo, descripcion),
+                    comercio=comercio if comercio else extraer_comercio(titulo, descripcion),
                     precio=precio,
                     tipo=tipo,
                     fecha_inicio=fecha_inicio,

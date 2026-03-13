@@ -2,8 +2,8 @@ from bs4 import BeautifulSoup
 import csv
 import os
 
-INPUT_HTML = r"C:\Users\ALVARO\Desktop\Dev\BenefitsWebScrapping\output\index.html"
-OUTPUT_CSV = r"C:\Users\ALVARO\Desktop\Dev\BenefitsWebScrapping\output\promociones.csv"
+INPUT_HTML = "output/index.html"
+OUTPUT_CSV = "output/promociones.csv"
 
 if not os.path.exists(INPUT_HTML):
     raise FileNotFoundError(f"No existe el archivo: {INPUT_HTML}")
