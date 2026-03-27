@@ -20,13 +20,13 @@ from html_generator import generar_html
 # ── Lista de scrapers activos ─────────────────────────────────────────────────
 # Comenta cualquier línea para deshabilitar un scraper individual.
 SCRAPERS = [
-    FalabellaScraper(),
-    PlinScraper(),
-    ScotiabankScraper(),
-    InterbankScraper(),
-    BBVAScraper(),
-    RipleyScraper(),
-    MovistarScraper()
+    FalabellaScraper()
+    # PlinScraper(),
+    # ScotiabankScraper(),
+    # InterbankScraper(),
+    # BBVAScraper(),
+    # RipleyScraper(),
+    # MovistarScraper()
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 

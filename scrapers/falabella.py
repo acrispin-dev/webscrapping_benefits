@@ -89,15 +89,23 @@ class FalabellaScraper(BaseScraper):
             page = context.new_page()
             self._cargar_inicio(page)
 
-            # Único pase de scroll: captura las 151 tarjetas sin abrir pestañas extra.
+            # Recopilar todas las tarjetas mediante scroll continuo
             print(f"[{self.nombre}] Recopilando tarjetas...")
             tarjetas = self._recopilar_todas_las_tarjetas(page)
             print(f"[{self.nombre}] {len(tarjetas)} tarjetas recopiladas.")
 
+            # Ahora CLICKEAR cada tarjeta para extraer detalles
+            print(f"[{self.nombre}] Extrayendo detalles de cada tarjeta...")
+            for data_id_str in sorted(tarjetas.keys(), key=lambda x: int(x)):
+                try:
+                    self._extraer_detalles_tarjeta(page, data_id_str, tarjetas[data_id_str])
+                except Exception as e:
+                    _dbg(f"Error extrayendo detalles de {data_id_str}: {e}")
+
             context.close()
             browser.close()
 
-        # Convertir a Promocion usando solo los datos de la card (sin visitar detalles)
+        # Convertir a Promocion usando datos básicos + detalles extraídos
         promociones: List[Promocion] = []
         for data_id_str, entry in sorted(tarjetas.items(), key=lambda x: int(x[0])):
             info = entry['info']
@@ -126,16 +134,151 @@ class FalabellaScraper(BaseScraper):
                 descripcion=info['descripcion'],
                 precio=info['precio'],
                 tipo=info['tipo'],
-                fecha_inicio="",
-                fecha_fin=info.get('dias', ''),
-                stock="",
+                fecha_inicio=info.get('fecha_inicio', ''),
+                fecha_fin=info.get('fecha_fin', ''),
+                stock=info.get('stock', ''),
                 url=self.url_base,
                 imagen_url=info['imagen_url'],
-                condiciones="",
+                condiciones=info.get('condiciones', ''),
             ))
 
         print(f"[{self.nombre}] {len(promociones)} promociones procesadas.")
         return promociones
+
+    def _extraer_detalles_tarjeta(self, page, data_id_str: str, entry: dict) -> None:
+        """
+        Clickea una tarjeta específica y extrae información detallada del modal/overlay.
+        
+        Estrategia:
+        1. Scroll la tarjeta a viewport para evitar target out of viewport
+        2. Click con manejo de reintentos
+        3. Espera que aparezca contenido (modal, overlay, nueva sección)
+        4. Extrae: Términos y condiciones, fechas, stock
+        5. Cierra el modal (ESC o click fuera)
+        6. Vuelve al listado principal si es necesario
+        7. Delay anti-timeout entre clicks
+        """
+        try:
+            # Localizar la tarjeta por data-id
+            card = page.query_selector(f'[data-id="{data_id_str}"]')
+            if not card:
+                _dbg(f"_extraer_detalles: data-id={data_id_str} NO ENCONTRADO en DOM")
+                return
+            
+            # Scroll a viewport (centrar la tarjeta)
+            page.evaluate(f"""
+                const card = document.querySelector('[data-id="{data_id_str}"]');
+                if (card) {{
+                    card.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                }}
+            """)
+            time.sleep(0.8)  # Esperar scroll suave + anti-timeout
+            
+            # Click (con reintentos por si hay overlay)
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    _dbg(f"_extraer_detalles: clickeando data-id={data_id_str} (intento {attempt+1})")
+                    page.locator(f'[data-id="{data_id_str}"]').click(timeout=5000)
+                    break
+                except Exception as e:
+                    if attempt < max_retries - 1:
+                        time.sleep(0.5)
+                    else:
+                        _dbg(f"_extraer_detalles: click fallido luego de {max_retries} intentos: {e}")
+                        return
+            
+            # Esperar a que aparezca contenido detallado
+            # Puede ser: modal, expandable section, overlay, etc.
+            time.sleep(1.5)  # Dar tiempo a que se anima el modal/overlay
+            
+            # Intentar capturar el contenido detallado
+            html_page = page.locator('body').inner_html()
+            soup_page = BeautifulSoup(html_page, 'html.parser')
+            
+            # Buscar texto de términos y condiciones
+            terminos_elem = soup_page.find(string=lambda s: s and 'Términos y condiciones' in s)
+            if terminos_elem:
+                parent = terminos_elem.find_parent(['div', 'section', 'article'])
+                if parent:
+                    texto_completo = parent.get_text(separator=' ', strip=True)
+                    entry['info']['condiciones'] = texto_completo[:500]  # Limitar a 500 chars
+                    _dbg(f"_extraer_detalles: encontrados términos para {data_id_str}")
+            
+            # Buscar fechas (formato DD/MM/YYYY o similar)
+            fecha_pattern = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b'
+            fechas = re.findall(fecha_pattern, soup_page.get_text())
+            if fechas:
+                entry['info']['fecha_inicio'] = fechas[0] if len(fechas) > 0 else ''
+                entry['info']['fecha_fin'] = fechas[-1] if len(fechas) > 1 else fechas[0]
+                _dbg(f"_extraer_detalles: encontradas fechas {entry['info']['fecha_inicio']} - {entry['info']['fecha_fin']}")
+            
+            # Buscar stock (ej. "Stock: 100", "Stock disponible: X")
+            stock_pattern = r'[Ss]tock(?:\s+disponible)?[\s:]*(\d+|\w+)'
+            stock_match = re.search(stock_pattern, soup_page.get_text())
+            if stock_match:
+                entry['info']['stock'] = stock_match.group(1)
+                _dbg(f"_extraer_detalles: encontrado stock: {entry['info']['stock']}")
+            
+            # ═══════════════════════════════════════════════════════════════
+            # CERRAR MODAL Y VOLVER AL LISTADO
+            # ═══════════════════════════════════════════════════════════════
+            url_antes = page.url
+            _dbg(f"_extraer_detalles: URL antes de cerrar: {url_antes}")
+            
+            # Estrategia 1: Click en botón "Entendido" si aparece
+            try:
+                entendido_btn = page.locator('button:has-text("Entendido")').first
+                if entendido_btn.count() > 0:
+                    _dbg(f"_extraer_detalles: clickeando botón 'Entendido'")
+                    entendido_btn.click()
+                    time.sleep(0.8)
+            except Exception:
+                pass
+            
+            # Estrategia 2: Presionar ESC
+            page.keyboard.press("Escape")
+            time.sleep(0.8)
+            
+            # Estrategia 3: Si la URL cambió (navegó a detalle), volver a la principal
+            url_actual = page.url
+            if url_actual != url_antes:
+                _dbg(f"_extraer_detalles: URL cambió a {url_actual}, volviendo al listado")
+                page.go_back()
+                time.sleep(1.5)
+                try:
+                    page.wait_for_selector('[data-id]', timeout=10000)
+                    _dbg(f"_extraer_detalles: tarjetas disponibles nuevamente")
+                except Exception as e:
+                    _dbg(f"_extraer_detalles: tarjetas tardaron en volver: {e}")
+                    time.sleep(2)
+            else:
+                # Estrategia 4: Si fue modal pero no se cerró completamente, click fuera
+                try:
+                    modal_backdrop = page.query_selector('[class*="overlay"], [class*="backdrop"], [class*="modal-backdrop"], [class*="Modal_background"]')
+                    if modal_backdrop:
+                        _dbg(f"_extraer_detalles: clickeando en backdrop del modal")
+                        modal_backdrop.click()
+                        time.sleep(0.8)
+                except Exception as e:
+                    _dbg(f"_extraer_detalles: no se pudo clickear backdrop: {e}")
+                
+                # Estrategia 5: Si aún hay modal visible, intentar botón Cerrar
+                try:
+                    close_btn = page.query_selector('button:has-text("CERRAR"), button:has-text("Cerrar"), [aria-label*="Cerrar"], [aria-label*="close"]')
+                    if close_btn:
+                        _dbg(f"_extraer_detalles: clickeando botón Cerrar")
+                        close_btn.click()
+                        time.sleep(0.8)
+                except Exception as e:
+                    _dbg(f"_extraer_detalles: no se pudo clickear cerrar: {e}")
+            
+            # Anti-timeout: delay variable entre clicks
+            time.sleep(0.3 + (int(data_id_str) % 5) * 0.2)  # Entre 0.3 y 1.3 segundos
+            _dbg(f"_extraer_detalles: completado para data-id={data_id_str}")
+            
+        except Exception as e:
+            _dbg(f"_extraer_detalles: error general en {data_id_str}: {e}")
 
     def _get_total_esperado(self, page) -> int:
         """Lee la cantidad total de promos del encabezado de la página (ej. 'Todos (151)')."""
@@ -220,6 +363,17 @@ class FalabellaScraper(BaseScraper):
                     # construir la URL de detalle desde el logo_slug.
                     if not href and info.get('logo_slug'):
                         href = f"{self.url_base}/{info['logo_slug']}"
+                    
+                    # Inicializar campos que serán llenados por _extraer_detalles_tarjeta
+                    if 'condiciones' not in info:
+                        info['condiciones'] = ''
+                    if 'fecha_inicio' not in info:
+                        info['fecha_inicio'] = ''
+                    if 'fecha_fin' not in info:
+                        info['fecha_fin'] = ''
+                    if 'stock' not in info:
+                        info['stock'] = ''
+                    
                     tarjetas[id_str] = {'info': info, 'href': href}
                     _dbg(f"recopilar: guardado data-id={id_str} "
                          f"href={'OK' if href else 'VACIO'} "
