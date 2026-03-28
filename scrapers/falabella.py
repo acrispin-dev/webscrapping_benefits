@@ -197,18 +197,27 @@ class FalabellaScraper(BaseScraper):
 
     def _extraer_detalles_tarjeta(self, page, data_id_str: str, entry: dict) -> None:
         """
-        Extrae información de una tarjeta específica SIN recargar la página cada vez.
+        Extrae información de una tarjeta específica.
         
-        Estrategia (optimizada para batch processing):
-        1. Scrollear hasta encontrar la tarjeta (reutiliza la página cargada)
-        2. Clickear y esperar modal
-        3. Extraer información
-        4. Cerrar modal y volver al listado
-        5. SIN recargar página → menos memory leaks
+        Flujo:
+        1. Scrollear lentamente desde el inicio hasta encontrar el card específico
+        2. Hacer click en el card para entrar a su página de detalle
+        3. Esperar a que cargue la página de detalle
+        4. Extraer información (fechas, stock, condiciones)
+        5. Navegar a URL base para volver al listado
+        6. Repetir con el siguiente card
         """
         try:
-            # Paso 1: Scrollear hasta encontrar la tarjeta (sin recargar)
-            max_scroll_attempts = 50  # Reducido de 100
+            # Paso 0: Resetear scroll a inicio
+            try:
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(0.5)
+            except Exception as e:
+                _dbg(f"_extraer_detalles: error reseteando scroll para {data_id_str}: {e}")
+            
+            # Paso 1: Scrollear lentamente hasta encontrar la tarjeta específica
+            # (mismo ritmo que en _recopilar_todas_las_tarjetas para permitir carga progresiva)
+            max_scroll_attempts = 120
             card = None
             
             for scroll_attempt in range(max_scroll_attempts):
@@ -217,70 +226,82 @@ class FalabellaScraper(BaseScraper):
                     _dbg(f"_extraer_detalles: data-id={data_id_str} encontrado en attempt {scroll_attempt}")
                     break
                 
-                # Scrollear hacia abajo gradualmente
+                # Scrollear hacia abajo (mismos parámetros que recopilar)
                 try:
-                    page.evaluate("window.scrollBy(0, 200)")
-                    time.sleep(0.15)
+                    page.evaluate("""
+                        window.scrollTo(0, document.documentElement.scrollHeight);
+                        var nextDiv = document.getElementById('__next');
+                        if(nextDiv) { nextDiv.scrollTop = nextDiv.scrollHeight; }
+                    """)
+                    time.sleep(0.5)  # IMPORTANTE: esperar tiempo suficiente para cargas
                 except Exception:
                     pass
             
             if not card:
-                _dbg(f"_extraer_detalles: data-id={data_id_str} NO ENCONTRADO")
+                _dbg(f"_extraer_detalles: data-id={data_id_str} NO ENCONTRADO tras {max_scroll_attempts} intentos")
                 return
             
-            # Paso 2: Scroll a viewport y click
+            # Paso 2: Hacer visible el card y hacer click
             try:
                 page.evaluate(f"""
                     const card = document.querySelector('[data-id="{data_id_str}"]');
-                    if (card) {{ card.scrollIntoView({{ behavior: 'auto', block: 'center' }}); }}
+                    if (card) {{ card.scrollIntoView({{ behavior: 'smooth', block: 'center' }}); }}
                 """)
-                time.sleep(0.5)
+                time.sleep(1.0)  # Esperar a que se centre en viewport
+                
+                _dbg(f"_extraer_detalles: haciendo click en data-id={data_id_str}")
+                page.locator(f'[data-id="{data_id_str}"]').click(timeout=5000)
+                time.sleep(2.0)  # Esperar a que navegue a página de detalle
+                
             except Exception as e:
-                _dbg(f"_extraer_detalles: error en scrollIntoView para {data_id_str}: {e}")
-            
-            # Click
-            try:
-                page.locator(f'[data-id="{data_id_str}"]').click(timeout=3000)
-            except Exception as e:
-                _dbg(f"_extraer_detalles: click fallido para {data_id_str}: {e}")
+                _dbg(f"_extraer_detalles: error en click/navegación para {data_id_str}: {e}")
                 return
             
-            # Paso 3: Esperar modal y extraer información
+            # Paso 3: Extraer información de la página de detalle
             try:
-                time.sleep(1.0)  # Esperar a que aparezca el modal
+                _dbg(f"_extraer_detalles: extrayendo datos de data-id={data_id_str}")
                 html_page = page.locator('body').inner_html()
                 soup_page = BeautifulSoup(html_page, 'html.parser')
                 
-                # Buscar fechas (patrón flexible)
+                # Buscar fechas
                 texto_completo = soup_page.get_text(separator=' ')
                 fecha_pattern = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b'
                 fechas = re.findall(fecha_pattern, texto_completo)
                 
                 if fechas:
-                    # Filtrar solo fechas válidas (evitar "de" mal interpretado)
                     fechas_validas = [f for f in fechas if len(f) >= 8]
                     if fechas_validas:
                         entry['info']['fecha_inicio'] = fechas_validas[0]
                         entry['info']['fecha_fin'] = fechas_validas[-1] if len(fechas_validas) > 1 else fechas_validas[0]
+                        _dbg(f"_extraer_detalles: fechas encontradas para {data_id_str}: {entry['info']['fecha_inicio']} - {entry['info']['fecha_fin']}")
                 
-                # Buscar stock (mejorado para evitar ruido)
+                # Buscar stock
                 stock_pattern = r'(?:stock|disponible)[\s:]*(\d+|máximo|mínimo|de|promocional|precios)'
                 stock_match = re.search(stock_pattern, texto_completo, re.IGNORECASE)
                 if stock_match:
                     stock_val = stock_match.group(1).strip()
-                    # Solo guardar si es un número o una palabra importante
                     if stock_val.isdigit() or stock_val in ['máximo', 'mínimo']:
                         entry['info']['stock'] = stock_val
+                        _dbg(f"_extraer_detalles: stock encontrado para {data_id_str}: {stock_val}")
                 
             except Exception as e:
                 _dbg(f"_extraer_detalles: error extrayendo datos para {data_id_str}: {e}")
             
-            # Paso 4: Cerrar modal
+            # Paso 4: Navegar a URL base para volver al listado
             try:
-                page.keyboard.press("Escape")
-                time.sleep(0.4)
-            except Exception:
-                pass
+                _dbg(f"_extraer_detalles: navegando a URL base {self.url_base} para {data_id_str}")
+                # Usar wait_until="domcontentloaded" (menos restrictivo que networkidle)
+                page.goto(self.url_base, wait_until="domcontentloaded", timeout=60000)
+                time.sleep(1.0)
+                _dbg(f"_extraer_detalles: regreso a URL base completado para {data_id_str}")
+            except Exception as e:
+                _dbg(f"_extraer_detalles: error navegando a URL base para {data_id_str}: {e}")
+                # Fallback: recargando con wait_until menos estricto
+                try:
+                    page.goto(self.url_base, wait_until="load", timeout=40000)
+                    time.sleep(1.0)
+                except Exception as e2:
+                    _dbg(f"_extraer_detalles: fallback también falló para {data_id_str}: {e2}")
             
             _dbg(f"_extraer_detalles: completado para data-id={data_id_str}")
             
