@@ -471,14 +471,27 @@ class FalabellaScraper(BaseScraper):
             return {}
         img_url = img_el.get("src", "")
 
-        title_el = soup.select_one('[class*="title"]')
+        # Buscar el contenedor top-content específico
+        top_content = soup.select_one('[class*="top-content"]')
+        
+        # Extraer título desde <h2> dentro del top-content
+        if top_content:
+            title_el = top_content.select_one('h2[class*="title"]')
+        else:
+            title_el = soup.select_one('h2[class*="title"]')
+        
         titulo = (title_el.get_text(strip=True) if title_el
                   else img_el.get("alt", "").strip())
         if not titulo:
             _dbg("_parsear_card_soup: sin título → {}")
             return {}
 
-        desc_el = soup.select_one('[class*="description"]')
+        # Extraer descripción desde <p> dentro del top-content
+        if top_content:
+            desc_el = top_content.select_one('p[class*="description"]')
+        else:
+            desc_el = soup.select_one('p[class*="description"]')
+        
         descripcion = desc_el.get_text(strip=True) if desc_el else ""
 
         elite_el = soup.select_one('[class*="tag-elite"]')
