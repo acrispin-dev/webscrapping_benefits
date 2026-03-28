@@ -263,7 +263,15 @@ class FalabellaScraper(BaseScraper):
                 html_page = page.locator('body').inner_html()
                 soup_page = BeautifulSoup(html_page, 'html.parser')
                 
-                # Buscar fechas
+                # Extraer comercio desde <h2 class="CardImage_commerce-name__...">
+                commerce_h2 = soup_page.select_one('h2[class*="commerce-name"]')
+                if commerce_h2:
+                    comercio_extraido = commerce_h2.get_text(strip=True)
+                    if comercio_extraido:
+                        entry['info']['comercio'] = comercio_extraido
+                        _dbg(f"_extraer_detalles: comercio encontrado para {data_id_str}: {comercio_extraido}")
+                
+                # Buscar fechas (mantener lógica existente)
                 texto_completo = soup_page.get_text(separator=' ')
                 fecha_pattern = r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b'
                 fechas = re.findall(fecha_pattern, texto_completo)
@@ -275,14 +283,37 @@ class FalabellaScraper(BaseScraper):
                         entry['info']['fecha_fin'] = fechas_validas[-1] if len(fechas_validas) > 1 else fechas_validas[0]
                         _dbg(f"_extraer_detalles: fechas encontradas para {data_id_str}: {entry['info']['fecha_inicio']} - {entry['info']['fecha_fin']}")
                 
-                # Buscar stock
-                stock_pattern = r'(?:stock|disponible)[\s:]*(\d+|máximo|mínimo|de|promocional|precios)'
-                stock_match = re.search(stock_pattern, texto_completo, re.IGNORECASE)
-                if stock_match:
-                    stock_val = stock_match.group(1).strip()
-                    if stock_val.isdigit() or stock_val in ['máximo', 'mínimo']:
+                # Buscar stock en el párrafo legal con clase "discounts-detail_legal-text"
+                legal_p = soup_page.select_one('p[class*="legal-text"]')
+                if legal_p:
+                    texto_legal = legal_p.get_text(separator=' ')
+                    
+                    # Patrones mejorados para extraer stock:
+                    # "stock de X unidades", "hasta agotar stock de X", "X unidades", etc.
+                    stock_patterns = [
+                        r'stock\s+de\s+(\d+(?:[.,]\d{3})*(?:[.,]\d+)?)\s+unidades',
+                        r'agotar\s+stock\s+de\s+(\d+(?:[.,]\d{3})*(?:[.,]\d+)?)',
+                        r'disponibles:\s+(\d+(?:[.,]\d{3})*(?:[.,]\d+)?)\s+unidades',
+                        r'máximo\s+(\d+(?:[.,]\d{3})*(?:[.,]\d+)?)\s+unidades',
+                        r'stock\s+sujeto\s+a\s+disponibilidad',  # Indica stock limitado
+                    ]
+                    
+                    stock_encontrado = None
+                    for pattern in stock_patterns:
+                        match = re.search(pattern, texto_legal, re.IGNORECASE)
+                        if match:
+                            stock_encontrado = match.group(1) if match.lastindex else "Limitado"
+                            break
+                    
+                    # Si encontramos stock numérico, normalizarlo
+                    if stock_encontrado and stock_encontrado != "Limitado":
+                        # Reemplazar comas/puntos por separadores si es necesario
+                        stock_val = stock_encontrado.replace('.', '').replace(',', '')
                         entry['info']['stock'] = stock_val
-                        _dbg(f"_extraer_detalles: stock encontrado para {data_id_str}: {stock_val}")
+                        _dbg(f"_extraer_detalles: stock encontrado para {data_id_str}: {stock_val} unidades")
+                    elif "stock sujeto a disponibilidad" in texto_legal.lower():
+                        entry['info']['stock'] = "Limitado"
+                        _dbg(f"_extraer_detalles: stock limitado detectado para {data_id_str}")
                 
             except Exception as e:
                 _dbg(f"_extraer_detalles: error extrayendo datos para {data_id_str}: {e}")
