@@ -129,33 +129,34 @@ class PlinScraper(BaseScraper):
         return bool(next_link and next_link.get("href"))
 
     def _parsear_item(self, item: BeautifulSoup) -> Promocion | None:
-        titulo, valor_raw = _extraer_titulo_y_valor(item)
-        if not titulo:
+        comercio, valor_raw = _extraer_titulo_y_valor(item)
+        if not comercio:
             return None
 
         img_url     = _extraer_img(item)
-        descripcion = _extraer_descripcion(item, titulo, valor_raw)
+        promocion   = _extraer_promocion_nombre(item)  # Lo que viene después del h3
         href        = _extraer_href(item)
-        comercio    = titulo   # en Plin, el h3 ES el nombre del comercio (ej: "Tambo")
-        categoria   = _extraer_categoria(item, titulo, descripcion)
-        precio, tipo = _clasificar_valor(valor_raw, titulo + " " + descripcion)
-        fecha_inicio, fecha_fin = _extraer_fechas_item(descripcion, item)
-        stock       = _extraer_stock(titulo + " " + descripcion)
+        categoria   = _extraer_categoria(item, comercio, promocion)
+        precio, tipo = _clasificar_valor(valor_raw, comercio + " " + promocion)
+        fecha_inicio, fecha_fin = _extraer_fechas_item(promocion, item)
+        
+        # Crear resumen: título de promo + precio + fechas
+        resumen = _crear_resumen(promocion, precio, fecha_inicio, fecha_fin)
 
         return Promocion(
             fuente=self.nombre,
             categoria=categoria,
-            comercio=comercio,
-            titulo=titulo,
-            descripcion=descripcion,
+            comercio=comercio,  # Nombre del comercio (antes del strong)
+            titulo=promocion,   # La promoción (lo que viene después del h3)
+            descripcion=resumen,  # Resumen: promo + precio + fechas (para mostrar en tabla)
             precio=precio,
             tipo=tipo,
             fecha_inicio=fecha_inicio,
             fecha_fin=fecha_fin,
-            stock=stock,
+            stock="",  # Se llenará en el detalle con _enriquecer_detalle()
             url=href or self.url_base,
             imagen_url=img_url,
-            condiciones="",
+            condiciones="",  # Condiciones vacías (se enriquecerá con T&C si es necesario)
         )
 
     def _enriquecer_detalle(self, promo: Promocion) -> None:
@@ -168,12 +169,11 @@ class PlinScraper(BaseScraper):
         if not section:
             return
 
-        condiciones = section.get_text(separator=" ", strip=True)
-        condiciones = re.sub(
-            r'^T[eé]rminos\s+y\s+[Cc]ondiciones\s*:\s*', '', condiciones
+        condiciones_text = section.get_text(separator=" ", strip=True)
+        condiciones_text = re.sub(
+            r'^T[eé]rminos\s+y\s+[Cc]ondiciones\s*:\s*', '', condiciones_text
         ).strip()
-        condiciones = condiciones.replace('\xa0', ' ')   # normalizar espacios HTML
-        promo.condiciones = condiciones
+        condiciones_text = condiciones_text.replace('\xa0', ' ')   # normalizar espacios HTML
 
         # Imagen en mayor resolución desde el div.image (background-image CSS)
         img_div = soup.find("div", class_=re.compile(r'\bimage\b'))
@@ -183,21 +183,20 @@ class PlinScraper(BaseScraper):
             if m_img:
                 promo.imagen_url = m_img.group(1)
 
-        # Stock más preciso que el inferido desde el listado
-        stock_det = _extraer_stock_detalle(condiciones)
+        # Stock desde el detalle (T&C)
+        stock_det = _extraer_stock_detalle(condiciones_text)
         if stock_det:
             promo.stock = stock_det
 
         # Fechas más precisas desde el texto legal completo
-        fi, ff = _extraer_fechas_detalle(condiciones)
+        fi, ff = _extraer_fechas_detalle(condiciones_text)
         if fi or ff:
             promo.fecha_inicio = fi
             promo.fecha_fin = ff
 
-        # Comercio desde el texto legal (más preciso que inferencia por título)
-        comercio_det = extraer_comercio_de_condiciones(condiciones)
-        if comercio_det:
-            promo.comercio = comercio_det
+        # Actualizar descripción con fechas precisas obtenidas del T&C
+        resumen_actualizado = _crear_resumen(promo.titulo, promo.precio, promo.fecha_inicio, promo.fecha_fin)
+        promo.descripcion = resumen_actualizado
 
 
 # ── Helpers de parseo de item ────────────────────────────────────────────────
@@ -238,6 +237,30 @@ def _extraer_href(item: BeautifulSoup) -> str:
     return link_el.get("href", "") if link_el else ""
 
 
+def _extraer_promocion_nombre(item: BeautifulSoup) -> str:
+    """Extrae el nombre de la promoción (lo que viene después del </h3>)."""
+    h3 = item.find("h3")
+    if not h3:
+        return ""
+    
+    # Buscar el siguiente sibling (puede ser texto directo o un elemento)
+    next_elem = h3.next_sibling
+    while next_elem:
+        if isinstance(next_elem, str):
+            # Nodo de texto
+            text = next_elem.strip()
+            if text:
+                return text
+        elif hasattr(next_elem, 'name') and next_elem.name:
+            # Es un elemento HTML (p, div, span, etc.)
+            text = next_elem.get_text(strip=True)
+            if text:
+                return text
+        next_elem = next_elem.next_sibling
+    
+    return ""
+
+
 def _extraer_categoria(item: BeautifulSoup, titulo: str, descripcion: str) -> str:
     cat_el = item.find(class_=re.compile(r'categ|tag|type', re.I))
     cat_raw = cat_el.get_text(strip=True) if cat_el else ""
@@ -253,27 +276,39 @@ def _extraer_fechas_item(descripcion: str, item: BeautifulSoup) -> Tuple[str, st
 
 
 def _extraer_stock_detalle(texto: str) -> str:
-    """Extrae stock del texto legal de Términos y Condiciones."""
-    # "Stock máximo de 3000 promociones"
-    m = re.search(r'stock\s+máximo\s+de\s+([\d,.]+)\s*(\w+)?', texto, re.IGNORECASE)
+    """Extrae stock del texto legal (sin sobrescribir - solo retorna para registro).
+    Retorna: solo el número
+    """
+    # "Stock: 2,000 promociones"
+    m = re.search(r'stock\s*:\s*([\d,.]+)', texto, re.IGNORECASE)
     if m:
-        unidad = (m.group(2) or "unidades").rstrip('.')
-        return f"{m.group(1)} {unidad}"
+        return m.group(1)
+
+    # "stock total mínimo de 500" o "stock mínimo de" o "stock máximo de"
+    m = re.search(r'stock\s+(?:total\s+)?(?:máximo|mínimo)\s+de\s+([\d,.]+)', texto, re.IGNORECASE)
+    if m:
+        return m.group(1)
+
+    # "stock de X unidades/cupos/promociones"
+    m = re.search(r'stock\s+de\s+([\d,.]+)\s+(?:unidades|cupos|promociones)', texto, re.IGNORECASE)
+    if m:
+        return m.group(1)
 
     # "máximo de X cupos/unidades/promociones"
-    m = re.search(r'máximo\s+de\s+([\d,.]+)\s+(\w+)', texto, re.IGNORECASE)
+    m = re.search(r'máximo\s+de\s+([\d,.]+)\s+(?:cupos|unidades|promociones)', texto, re.IGNORECASE)
     if m:
-        return f"{m.group(1)} {m.group(2)}"
+        return m.group(1)
 
     # "X unidades/cupos disponibles"
-    m = re.search(r'([\d,.]+)\s+(\w+)\s+disponibles?', texto, re.IGNORECASE)
+    m = re.search(r'([\d,.]+)\s+(?:unidades|cupos|promociones)\s+disponibles?', texto, re.IGNORECASE)
     if m:
-        return f"{m.group(1)} {m.group(2)}"
+        return m.group(1)
+    
+    # "agotar stock de X unidades" o "acabar stock de X unidades"
+    m = re.search(r'(?:agotar|acabar)\s+stock\s+de\s+([\d,.]+)', texto, re.IGNORECASE)
+    if m:
+        return m.group(1)
 
-    if re.search(r'hasta agotar\s+stock', texto, re.IGNORECASE):
-        return "Hasta agotar stock"
-    if re.search(r'sujeto a\s+(?:stock|disponibilidad)', texto, re.IGNORECASE):
-        return "Sujeto a disponibilidad"
     return ""
 
 
@@ -456,12 +491,54 @@ def _norm_fecha(s: str) -> str:
 
 
 def _extraer_stock(texto: str) -> str:
+    """Extrae stock - solo el número sin tipo."""
     t = texto.lower()
-    m = re.search(
-        r'stock\s*(?:mínimo|minimo|de)?\s*:?\s*(\d[\d,.]*)\s*(?:unidades?|cupos?)?', t
-    )
+    
+    # "stock máximo de X"
+    m = re.search(r'stock\s+máximo\s+de\s+(\d[\d,.]*)', t)
     if m:
-        return texto[t.index(m.group(0)): t.index(m.group(0)) + len(m.group(0))].strip()
-    if re.search(r'hasta agotar|sujeto a stock|sujeto a disponibilidad', t):
-        return "Sujeto a disponibilidad"
+        return m.group(1)
+    
+    # "stock mínimo de X"
+    m = re.search(r'stock\s+mínimo\s+de\s+(\d[\d,.]*)', t)
+    if m:
+        return m.group(1)
+    
+    # "stock de X"
+    m = re.search(r'stock\s+de\s+(\d[\d,.]*)', t)
+    if m:
+        return m.group(1)
+    
+    # "stock: X"
+    m = re.search(r'stock\s*:\s*(\d[\d,.]*)', t)
+    if m:
+        return m.group(1)
+    
+    # "stock X" (sin separador)
+    m = re.search(r'stock\s+(\d[\d,.]*)', t)
+    if m:
+        return m.group(1)
+    
     return ""
+
+
+def _crear_resumen(titulo: str, precio: str, fecha_inicio: str, fecha_fin: str) -> str:
+    """Crea un resumen rápido: título + precio + fechas de vigencia."""
+    partes = [titulo.strip()]
+    
+    if precio:
+        partes.append(f"Precio: {precio}")
+    
+    # Construir rango de vigencia
+    vigencia = ""
+    if fecha_inicio and fecha_fin:
+        vigencia = f"Vigencia: {fecha_inicio} al {fecha_fin}"
+    elif fecha_inicio:
+        vigencia = f"Vigencia desde: {fecha_inicio}"
+    elif fecha_fin:
+        vigencia = f"Vigencia hasta: {fecha_fin}"
+    
+    if vigencia:
+        partes.append(vigencia)
+    
+    return " | ".join(partes)
