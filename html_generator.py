@@ -15,6 +15,7 @@ FUENTE_COLORES = {
     "Banco Ripley": "#6D1C7A",
     "Movistar": "#019DF4",
     "Entel": "#00AEEF",
+    "OH": "#1B5E20",
 }
 
 FUENTE_EMOJIS = {
@@ -26,6 +27,7 @@ FUENTE_EMOJIS = {
     "Banco Ripley": "🏦",
     "Movistar": "📶",
     "Entel": "📡",
+    "OH": "💳",
 }
 
 

@@ -15,6 +15,7 @@ from scrapers.interbank import InterbankScraper
 from scrapers.bbva import BBVAScraper
 from scrapers.ripley import RipleyScraper
 from scrapers.movistar import MovistarScraper
+from scrapers.oh import OhScraper
 from html_generator import generar_html
 
 # ── Lista de scrapers activos ─────────────────────────────────────────────────
@@ -22,11 +23,12 @@ from html_generator import generar_html
 SCRAPERS = [
     # FalabellaScraper(),
     # PlinScraper(),
-    ScotiabankScraper()
+    # ScotiabankScraper(),
     # InterbankScraper(),
     # BBVAScraper(),
-    # RipleyScraper(),
-    # MovistarScraper()
+    # RipleyScraper()
+    # MovistarScraper(),
+    # OhScraper()
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 

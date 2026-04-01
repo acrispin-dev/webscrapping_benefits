@@ -105,8 +105,19 @@ class RipleyScraper(BaseScraper):
         stock = ""
         m_stock = re.search(r'stock.*?([\d,\.]+)\s*(?:canjes|promociones|unidades|paquetes|platos|dsctos|descuentos)?', condiciones, re.IGNORECASE)
         if m_stock:
-            stock = m_stock.group(0).strip()
+            stock_num_raw = m_stock.group(1).strip()
+            # Elimina comas y puntos para obtener solo dígitos
+            stock_num = re.sub(r'[,\.]', '', stock_num_raw)
+            stock = stock_num
             
+        # Construir descripción con formato: promocion | fecha_inicio - fecha_fin | stock
+        descripcion_nueva = dcto_clean
+        if fecha_inicio or fecha_fin:
+            rango_fechas = f"{fecha_inicio} - {fecha_fin}".strip(' -')
+            descripcion_nueva = f"{dcto_clean} | {rango_fechas}"
+        if stock:
+            descripcion_nueva = f"{descripcion_nueva} | {stock}"
+        
         texto_full = f"{comercio} {dcto_clean} {descripcion}"
         precio, tipo = extraer_precio_tipo_de_texto(texto_full)
         tipo = tipo or 'Beneficio'
@@ -117,7 +128,7 @@ class RipleyScraper(BaseScraper):
             fuente=self.nombre,
             categoria=categoria,
             titulo=titulo,
-            descripcion=descripcion,
+            descripcion=descripcion_nueva,
             comercio=comercio,
             precio=precio,
             tipo=tipo,

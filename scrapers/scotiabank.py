@@ -246,9 +246,9 @@ def _extraer_fechas_scb(texto: str) -> Tuple[str, str]:
     txt_lower = texto.lower()
     pat_mes = '|'.join(_MESES)
     
-    # PATRÓN 1: "del DD al DD de mes del YYYY" (ej: "del 01 al 31 de marzo del 2026")
+    # PATRÓN 1: "desde el DD al DD de mes del YYYY" (ej: "desde el 01 al 31 de marzo del 2026")
     m_rango1 = re.search(
-        r'del?\s+(\d{1,2})\s+al?\s+(\d{1,2})\s+de\s+(' + pat_mes + r')'
+        r'desde\s+el\s+(\d{1,2})\s+al\s+(\d{1,2})\s+de\s+(' + pat_mes + r')'
         r'(?:\s+de(?:l)?\s+(\d{4}))?',
         txt_lower
     )
@@ -259,14 +259,27 @@ def _extraer_fechas_scb(texto: str) -> Tuple[str, str]:
             ff = f"{dia2.zfill(2)}/{_MESES[mes]}/{anio}"
             return fi, ff
     
-    # PATRÓN 2: "del DD de mes [del YYYY] al DD de mes del YYYY" (ej: "desde el 01 de febrero hasta el 31 de marzo")
+    # PATRÓN 2: "del DD al DD de mes del YYYY" (ej: "del 01 al 31 de marzo del 2026")
     m_rango2 = re.search(
+        r'del\s+(\d{1,2})\s+al\s+(\d{1,2})\s+de\s+(' + pat_mes + r')'
+        r'(?:\s+de(?:l)?\s+(\d{4}))?',
+        txt_lower
+    )
+    if m_rango2:
+        dia1, dia2, mes, anio = m_rango2.groups()
+        if anio:
+            fi = f"{dia1.zfill(2)}/{_MESES[mes]}/{anio}"
+            ff = f"{dia2.zfill(2)}/{_MESES[mes]}/{anio}"
+            return fi, ff
+    
+    # PATRÓN 3: "del DD de mes [del YYYY] al DD de mes del YYYY" (ej: "del 01 de febrero hasta el 31 de marzo")
+    m_rango3 = re.search(
         r'(?:del?|desde\s+el?)\s+(\d{1,2})\s+de\s+(' + pat_mes + r')(?:\s+de(?:l)?\s+(\d{4}))?'
         r'\s+(?:al?|hasta\s+el?)\s+(\d{1,2})\s+de\s+(' + pat_mes + r')(?:\s+de(?:l)?\s+(\d{4}))?',
         txt_lower
     )
-    if m_rango2:
-        dia1, mes1, y1, dia2, mes2, y2 = m_rango2.groups()
+    if m_rango3:
+        dia1, mes1, y1, dia2, mes2, y2 = m_rango3.groups()
         # Si el año no aparece en la primera fecha, heredar del segundo
         y1 = y1 or y2
         if y1 and y2:
@@ -274,7 +287,7 @@ def _extraer_fechas_scb(texto: str) -> Tuple[str, str]:
             ff = f"{dia2.zfill(2)}/{_MESES[mes2]}/{y2}"
             return fi, ff
 
-    # PATRÓN 3: "única fecha hasta [el] DD de mes [del YYYY]"
+    # PATRÓN 4: "única fecha hasta [el] DD de mes [del YYYY]"
     m_fin = re.search(
         r'(?:hasta|vence\s+el?)\s+(\d{1,2})\s+de\s+(' + pat_mes +
         r')(?:\s+de(?:l)?\s+(\d{4}))?',
@@ -285,7 +298,7 @@ def _extraer_fechas_scb(texto: str) -> Tuple[str, str]:
         if anio:
             return "", f"{dia.zfill(2)}/{_MESES[mes]}/{anio}"
 
-    # PATRÓN 4: fechas numéricas (utils.extraer_fechas)
+    # PATRÓN 5: fechas numéricas (utils.extraer_fechas)
     fi, ff = extraer_fechas(texto)
     # Evitar fecha_inicio == fecha_fin si proviénen del mismo match
     if fi and fi == ff:
