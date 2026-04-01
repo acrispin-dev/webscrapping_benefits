@@ -80,7 +80,7 @@ def generar_html(promociones: List[Promocion], ruta_salida: str = "output/index.
         filas_html += f"""
         <tr data-fuente="{fuente_safe}" data-categoria="{cat_safe}" data-tipo="{tipo_safe}" data-comercio="{comercio_safe}">
           <td>
-            <span class="badge" style="background:{color}">{emoji} {fuente_safe}</span>
+            <span class="badge" style="background:{color}">{fuente_safe}</span>
           </td>
           <td><span class="cat-tag">{cat_safe}</span></td>
           <td><span class="comercio-tag">{comercio_safe}</span></td>
