@@ -17,6 +17,7 @@ from scrapers.base import BaseScraper
 from scrapers.models import Promocion
 from scrapers.utils import extraer_precio_tipo_de_texto, extraer_comercio
 import time
+import re
 from typing import List
 
 class OhScraper(BaseScraper):
@@ -62,7 +63,7 @@ class OhScraper(BaseScraper):
                     self._cargar_todas_promociones(page)
                     
                     html = page.content()
-                    promos_categoria = self._parsear(html, categoria)
+                    promos_categoria = self._parsear(html, categoria, page)
                     print(f"[{self.nombre}] {len(promos_categoria)} promociones encontradas en {categoria}")
                     all_promociones.extend(promos_categoria)
                     
@@ -194,14 +195,16 @@ class OhScraper(BaseScraper):
             print(f"[{self.nombre}] Error buscando botón 'Ver más': {e}")
             return False
 
-    def _parsear(self, html: str, categoria: str) -> List[Promocion]:
+    def _parsear(self, html: str, categoria: str, page=None) -> List[Promocion]:
         soup = BeautifulSoup(html, "lxml")
         promociones = []
         
         # Buscar específicamente las tarjetas de promociones (oh-card-promotion)
         cards = soup.select('oh-card-promotion div.card-promotion')
         
-        seen = set()  # Para evitar duplicados
+        # PASO 1: Extraer primero todos los datos de las tarjetas
+        tarjetas_data = []
+        seen = set()
         
         for card in cards:
             try:
@@ -210,7 +213,7 @@ class OhScraper(BaseScraper):
                 if not link_elem:
                     continue
                 
-                # Extraer URL
+                # Extraer URL del href
                 enlace = link_elem.get('href', '')
                 if enlace and not enlace.startswith('http'):
                     enlace = self.url_base + enlace
@@ -248,22 +251,57 @@ class OhScraper(BaseScraper):
                 
                 # Solo agregar si tenemos los campos necesarios
                 if comercio and titulo and precio_dto:
-                    promociones.append(Promocion(
-                        fuente=self.nombre,
-                        categoria=categoria,
-                        titulo=titulo,
-                        descripcion=descripcion,
-                        comercio=comercio,
-                        precio=precio_dto,
-                        tipo=tipo,
-                        fecha_inicio="",
-                        fecha_fin="",
-                        stock="",
-                        url=enlace if enlace else self.url_base,
-                        imagen_url=imagen_url,
-                    ))
+                    tarjetas_data.append({
+                        'enlace': enlace,
+                        'titulo': titulo,
+                        'descripcion': descripcion,
+                        'comercio': comercio,
+                        'precio': precio_dto,
+                        'tipo': tipo,
+                        'imagen_url': imagen_url,
+                    })
             except Exception as e:
                 print(f"[{self.nombre}] Error procesando tarjeta: {e}")
+                continue
+        
+        # PASO 2: Para cada tarjeta, navegar directamente a su href extraído
+        for tarjeta in tarjetas_data:
+            try:
+                fecha_inicio = ""
+                fecha_fin = ""
+                stock = ""
+                promocion_detalle = tarjeta['titulo']
+                comercio_detalle = tarjeta['comercio']
+                
+                print(f"[{self.nombre}] Comercio de tarjeta original: {comercio_detalle}")
+                
+                if page and tarjeta['enlace']:
+                    print(f"[{self.nombre}] Extrayendo detalles de {tarjeta['titulo']}...")
+                    fecha_inicio, fecha_fin, stock, promocion_det, comercio_det = self._extraer_detalles_promo(page, tarjeta['enlace'])
+                    
+                    # Usar valores extraídos de la página de detalle si están disponibles
+                    if promocion_det:
+                        promocion_detalle = promocion_det
+                    if comercio_det:
+                        comercio_detalle = comercio_det
+                        print(f"[{self.nombre}] Comercio actualizado del detalle: {comercio_det}")
+                
+                promociones.append(Promocion(
+                    fuente=self.nombre,
+                    categoria=categoria,
+                    titulo=promocion_detalle,
+                    descripcion=promocion_detalle,
+                    comercio=comercio_detalle,
+                    precio=tarjeta['precio'],
+                    tipo=tarjeta['tipo'],
+                    fecha_inicio=fecha_inicio,
+                    fecha_fin=fecha_fin,
+                    stock=stock,
+                    url=tarjeta['enlace'],
+                    imagen_url=tarjeta['imagen_url'],
+                ))
+            except Exception as e:
+                print(f"[{self.nombre}] Error en promoción {tarjeta.get('titulo', 'desconocida')}: {e}")
                 continue
         
         return promociones
@@ -274,7 +312,6 @@ class OhScraper(BaseScraper):
             return ""
         
         precio_text = precio_text.strip()
-        import re
         
         # Si contiene %, extraer solo el número (sin %)
         if "%" in precio_text:
@@ -302,9 +339,188 @@ class OhScraper(BaseScraper):
         else:
             return "Beneficio"
     
+    def _extraer_detalles_promo(self, page, url: str) -> tuple:
+        """
+        Navega directamente al URL de una promoción usando el href extraído y 
+        extrae información detallada de la página de promoción.
+        Retorna (fecha_inicio, fecha_fin, stock, promocion, comercio)
+        """
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            
+            # ESPERAR a que el contenido Angular se renderice
+            # Esperar a que aparezca el título principal (h1.oh-text-headline-md)
+            try:
+                page.wait_for_selector('h1.oh-text-headline-md', timeout=5000)
+            except:
+                print(f"[{self.nombre}] Timeout esperando h1.oh-text-headline-md, continuando...")
+                pass
+            
+            time.sleep(1.5)  # Esperar 1.5 segundos adicionales para que cargue completamente la página
+            
+            html = page.content()
+            soup = BeautifulSoup(html, "lxml")
+            
+            # Inicializar variables
+            fecha_inicio = ""
+            fecha_fin = ""
+            stock = ""
+            promocion = ""
+            comercio = ""
+            
+            # EXTRACTOR 1: Comercio desde <h2 class="oh-text-body-lg">
+            comercio_elem = soup.select_one('h2.oh-text-body-lg')
+            if comercio_elem:
+                comercio = comercio_elem.get_text(strip=True)
+                print(f"[{self.nombre}] Comercio encontrado (h2): {comercio}")
+            else:
+                # Intenta alternativas si h2 no funciona
+                # Buscar en promotion__details o cualquier otro contenedor
+                for selector in ['div.promotion__details h2', 'div.promotion__content h2', '[class*="business"] h2', 'h2']:
+                    elem = soup.select_one(selector)
+                    if elem:
+                        text = elem.get_text(strip=True)
+                        if text and len(text) > 0:
+                            comercio = text
+                            print(f"[{self.nombre}] Comercio encontrado ({selector}): {comercio}")
+                            break
+                
+                if not comercio:
+                    print(f"[{self.nombre}] No se encontró h2.oh-text-body-lg (intentará alternativas)")
+                    # Como último recurso, buscar en parte del alt de la imagen del comercio
+                    img_alt = soup.select_one('img[src*="Comercio"]')
+                    if img_alt:
+                        alt_text = img_alt.get('alt', '')
+                        if alt_text:
+                            comercio = alt_text
+                            print(f"[{self.nombre}] Comercio desde imagen alt: {comercio}")
+            
+            # EXTRACTOR 2: Promoción desde <h1 class="oh-text-headline-md">
+            promocion_elem = soup.select_one('h1.oh-text-headline-md')
+            if promocion_elem:
+                promocion = promocion_elem.get_text(strip=True)
+                print(f"[{self.nombre}] Promoción encontrada: {promocion}")
+            else:
+                print(f"[{self.nombre}] No se encontró h1.oh-text-headline-md")
+            
+            # EXTRACTOR 3: Vigencia desde <div class="promotion__characteristics">
+            # Buscamos específicamente el tag con "Vigencia"
+            vigencia_div = soup.select_one('div.promotion__characteristics')
+            if vigencia_div:
+                print(f"[{self.nombre}] promotion__characteristics encontrado")
+                # Buscar dentro de este div el subtitle que contiene las fechas
+                caracteristicas = vigencia_div.select('div.promotion__characteristics__content')
+                print(f"[{self.nombre}] Características encontradas: {len(caracteristicas)}")
+                
+                for i, caracteristica in enumerate(caracteristicas):
+                    titulo = caracteristica.select_one('p.promotion__characteristics__title')
+                    if titulo:
+                        titulo_text = titulo.get_text(strip=True)
+                        print(f"[{self.nombre}] Característica {i}: {titulo_text}")
+                        
+                        if "Vigencia" in titulo_text:
+                            subtitle = caracteristica.select_one('p.promotion__characteristics__subtitle')
+                            if subtitle:
+                                texto_vigencia = subtitle.get_text(strip=True)
+                                print(f"[{self.nombre}] Texto vigencia: {texto_vigencia}")
+                                # Patrón para extraer fechas (DD de mes/número)
+                                # Buscar formato: "Válido desde el 01 enero, hasta el 30 de junio de 2026"
+                                # o "desde el...hasta el"
+                                
+                                # Primero intentar extraer fechas numéricas DD/MM/YYYY
+                                patron_numerico = r'(\d{1,2})/(\d{1,2})/(\d{4})'
+                                fechas_numericas = re.findall(patron_numerico, texto_vigencia)
+                                print(f"[{self.nombre}] Fechas numéricas encontradas: {fechas_numericas}")
+                                
+                                if len(fechas_numericas) >= 2:
+                                    fecha_inicio = f"{fechas_numericas[0][0]}/{fechas_numericas[0][1]}/{fechas_numericas[0][2]}"
+                                    fecha_fin = f"{fechas_numericas[-1][0]}/{fechas_numericas[-1][1]}/{fechas_numericas[-1][2]}"
+                                elif len(fechas_numericas) == 1:
+                                    fecha_fin = f"{fechas_numericas[0][0]}/{fechas_numericas[0][1]}/{fechas_numericas[0][2]}"
+                                
+                                # Si no encontramos fechas numéricas, extraer en formato texto
+                                # Patrón para "Válido desde el DD de mes, hasta el DD de mes de YYYY"
+                                # Este patrón captura: "01 enero" "30 junio" "2026"
+                                patron_texto = r'desde\s+el\s+(\d{1,2})\s+de\s+(\w+),?\s+(?:hasta\s+)?el\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})'
+                                match_texto = re.search(patron_texto, texto_vigencia, re.IGNORECASE | re.DOTALL)
+                                
+                                if not fecha_inicio or not fecha_fin:
+                                    if match_texto:
+                                        print(f"[{self.nombre}] Match encontrado: {match_texto.groups()}")
+                                        dia_inicio, mes_inicio, dia_fin, mes_fin, year = match_texto.groups()
+                                        # Convertir nombres de mes a números
+                                        meses = {
+                                            'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
+                                            'mayo': '05', 'junio': '06', 'julio': '07', 'agosto': '08',
+                                            'septiembre': '09', 'octubre': '10', 'noviembre': '11', 'diciembre': '12'
+                                        }
+                                        mes_inicio_num = meses.get(mes_inicio.lower(), '')
+                                        mes_fin_num = meses.get(mes_fin.lower(), '')
+                                        
+                                        if mes_inicio_num and mes_fin_num:
+                                            fecha_inicio = f"{dia_inicio.zfill(2)}/{mes_inicio_num}/{year}"
+                                            fecha_fin = f"{dia_fin.zfill(2)}/{mes_fin_num}/{year}"
+                                            print(f"[{self.nombre}] Fechas extraídas en formato texto: {fecha_inicio} - {fecha_fin}")
+                                    else:
+                                        print(f"[{self.nombre}] No match para patrón de texto. Buscando alternativas...")
+                                        # Intenta pattern alternativo:  "01 enero y 30 de junio" o variaciones
+                                        patron_alt = r'(\d{1,2})\s+(?:de\s+)?(\w+).*?(\d{1,2})\s+(?:de\s+)?(\w+)\s+(?:de\s+)?(\d{4})'
+                                        match_alt = re.search(patron_alt, texto_vigencia, re.IGNORECASE | re.DOTALL)
+                                        if match_alt:
+                                            dia_inicio, mes_inicio, dia_fin, mes_fin, year = match_alt.groups()
+                                            meses = {
+                                                'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
+                                                'mayo': '05', 'junio': '06', 'julio': '07', 'agosto': '08',
+                                                'septiembre': '09', 'octubre': '10', 'noviembre': '11', 'diciembre': '12'
+                                            }
+                                            mes_inicio_num = meses.get(mes_inicio.lower(), '')
+                                            mes_fin_num = meses.get(mes_fin.lower(), '')
+                                            if mes_inicio_num and mes_fin_num:
+                                                fecha_inicio = f"{dia_inicio.zfill(2)}/{mes_inicio_num}/{year}"
+                                                fecha_fin = f"{dia_fin.zfill(2)}/{mes_fin_num}/{year}"
+                                                print(f"[{self.nombre}] Fechas extraídas (patrón alt): {fecha_inicio} - {fecha_fin}")
+                            else:
+                                print(f"[{self.nombre}] No se encontró subtitle en vigencia")
+            else:
+                print(f"[{self.nombre}] No se encontró div.promotion__characteristics")
+            
+            # EXTRACTOR 4: Stock desde expansion-item o características
+            # Buscar en todo el contenido de texto de la página
+            texto_completo = soup.get_text()
+            
+            # Patrón para stock: "Stock: Máximo 1,000 promociones" o variaciones
+            # Buscar las variaciones más comunes
+            patron_stock = r'(?:stock|máximo|promociones|cantidades|unidades|disponibles|cupos|canjes)[\s:]*(\d{1,5}(?:[.,]\d{3})*)'
+            match_stock = re.search(patron_stock, texto_completo, re.IGNORECASE)
+            if match_stock:
+                stock_raw = match_stock.group(1)
+                # Limpiar formato (remover separadores de miles)
+                stock = re.sub(r'[,.\s]', '', stock_raw)
+                print(f"[{self.nombre}] Stock encontrado: {stock}")
+            else:
+                print(f"[{self.nombre}] No se encontró stock")
+            
+            print(f"[{self.nombre}] Detalles extraídos: Comercio={comercio}, Fecha Inicio={fecha_inicio}, Fecha Fin={fecha_fin}, Stock={stock}")
+            
+            # Volver a la página anterior
+            page.go_back(timeout=10000)
+            time.sleep(0.5)
+            
+            return fecha_inicio, fecha_fin, stock, promocion, comercio
+            
+        except Exception as e:
+            print(f"[{self.nombre}] Error extrayendo detalles: {e}")
+            import traceback
+            traceback.print_exc()
+            # Intentar volver aunque haya error
+            try:
+                page.go_back(timeout=5000)
+            except:
+                pass
+            return "", "", "", "", ""
+    
     def _extraer_precio(self, texto: str) -> tuple:
         """Extrae precio y tipo de descuento del texto"""
-        import re
         
         texto_lower = texto.lower()
         
