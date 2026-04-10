@@ -70,45 +70,214 @@ def extraer_precio_tipo_de_texto(texto: str) -> Tuple[str, str]:
 
 
 def extraer_stock(texto: str) -> str:
-    """Busca menciones de stock/unidades/cupos en texto libre."""
+    """
+    Busca menciones de stock/cantidad máxima/mínima en texto libre.
+    Soporta patrones como: "máximo X", "mínimo X", "stock X", "promociones X", etc.
+    """
     texto_l = texto.lower()
-    patrones = [
-        r'\d+\s*(?:unidades?|und\.?|cupos?|lugares?)',
-        r'hasta\s+agotar\s+(?:el\s+)?stock',
-        r'stock\s+limitado',
-        r'sujeto\s+a\s+disponibilidad',
-        r'v[aá]lidas?\s+hasta\s+agotar',
+    
+    # Patrones especializados que SÍ retornan número (se verifican PRIMERO)
+    patrones_con_numero = [
+        # "Hasta agotar stock 500 unidades" (nuevo patrón)
+        (r'hasta\s+agotar\s+stock\s+(\d+)\s*(?:unidades?|und\.?)?', 'stock'),
+        # "Stock mínimo/máximo de X unidades" (nuevo patrón)
+        (r'stock\s+(?:mínimo|máximo|min|max)\s+de\s+(\d+)\s*(?:unidades?|und\.?)?', 'stock'),
+        # "Máximo X promociones/unidades por cliente" → extrae el número
+        (r'(?:máximo|mínimo|min|max)\s+(\d+)\s*(?:promociones?|unidades?|und\.?|cupos?|lugares?|descuentos?|por\s+cliente)?', 'stock'),
+        # "Stock: X" o "Stock de X"
+        (r'stock\s*:?\s*(\d+)\s*(?:unidades?|und\.?|disponibles?)?', 'stock'),
+        # "X unidades disponibles"
+        (r'(\d+)\s*(?:unidades?|und\.?|cupos?|lugares?|descuentos?)\s+(?:disponibles?|máximo)?', 'cantidad'),
+        # "X promociones" (cuando aparece en contexto de cantidad)
+        (r'(\d+)\s+promociones?\s+(?:por\s+cliente|al\s+día|diarias?)?', 'promociones'),
     ]
-    for pat in patrones:
-        m = re.search(pat, texto_l)
+    
+    for patron, tipo in patrones_con_numero:
+        m = re.search(patron, texto_l, re.IGNORECASE)
         if m:
-            start = m.start()
-            return texto[start: start + len(m.group(0))].strip()
+            # Si tiene grupo de captura (número), retorna solo el número
+            if m.groups():
+                return m.group(1).strip()
+    
+    # Patrones que NO retornan número (son estado general, no cantidad específica)
+    # Se verifican al FINAL para no interferir con patrones que sí tienen números
+    patrones_sin_numero = [
+        r'sujeto\s+a\s+(?:la\s+)?disponibilidad',
+        r'stock\s+limitado',
+        r'(?<!agotar\s)(?:mientras)\s+(?:agotar\s+)?(?:el\s+)?stock',
+    ]
+    
+    # Si cuenta con estos patrones sin número específico, retorna vacío
+    for patron in patrones_sin_numero:
+        if re.search(patron, texto_l, re.IGNORECASE):
+            return ""
+    
+    # Si nada coincidió, retorna vacío
     return ""
 
 
-def extraer_fechas(texto: str):
+def extraer_fechas(texto: str) -> Tuple[str, str]:
     """
     Intenta extraer (fecha_inicio, fecha_fin) de un texto.
+    Soporta múltiples formatos: DD/MM/YYYY, DD-MM-YYYY, texto en español, etc.
     Retorna (str, str) — vacío si no se encuentra.
     """
+    if not texto:
+        return "", ""
+    
     texto_l = texto.lower()
-
-    # Patrón: "del DD/MM/YYYY al DD/MM/YYYY" o "DD/MM/YYYY - DD/MM/YYYY"
-    m_rango = re.search(
-        r'(?:del?\s+)?(\d{1,2}[/\.\-]\d{1,2}[/\.\-]\d{2,4})'
-        r'\s*(?:al?|a|[-–])\s*'
-        r'(\d{1,2}[/\.\-]\d{1,2}[/\.\-]\d{2,4})',
+    
+    # Diccionario de meses en español
+    meses = {
+        'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
+        'mayo': '05', 'junio': '06', 'julio': '07', 'agosto': '08',
+        'septiembre': '09', 'setiembre': '09', 'octubre': '10', 'noviembre': '11', 'diciembre': '12'
+    }
+    
+    # ── PATRÓN 1: Fechas numéricas en rango "DD/MM/YYYY - DD/MM/YYYY" ──────────────
+    m_rango_num = re.search(
+        r'(?:del?\s+)?(\d{1,2})[/\.\-](\d{1,2})[/\.\-](\d{2,4})'
+        r'\s*(?:al?|a|[-–]|hasta)\s*'
+        r'(\d{1,2})[/\.\-](\d{1,2})[/\.\-](\d{2,4})',
         texto_l
     )
-    if m_rango:
-        return m_rango.group(1), m_rango.group(2)
-
-    # Solo fecha fin: "hasta el DD/MM"
-    m_fin = re.search(r'(?:hasta|vence\s+el?)\s+(\d{1,2}[/\.\-]\d{1,2}(?:[/\.\-]\d{2,4})?)', texto_l)
-    if m_fin:
-        return "", m_fin.group(1)
-
+    if m_rango_num:
+        d1, m1, y1, d2, m2, y2 = m_rango_num.groups()
+        y1 = f"20{y1}" if len(y1) == 2 else y1
+        y2 = f"20{y2}" if len(y2) == 2 else y2
+        inicio = f"{d1.zfill(2)}/{m1.zfill(2)}/{y1}"
+        fin = f"{d2.zfill(2)}/{m2.zfill(2)}/{y2}"
+        return inicio, fin
+    
+    # ── PATRÓN 2: Fechas en texto español "DD de mes...DD de mes del YYYY" ────────
+    # Ejemplo: "desde 01 de enero hasta 30 de junio de 2026" OR "01 enero hasta 30 junio"
+    m_texto_es = re.search(
+        r'(?:desde\s+el?\s+)?(\d{1,2})\s+(?:de\s+)?(\w+).*?'
+        r'(?:hasta\s+el?\s+)?(\d{1,2})\s+(?:de\s+)?(\w+)\s+(?:del?\s+)?(\d{2,4})',
+        texto_l
+    )
+    if m_texto_es:
+        d1, mes1, d2, mes2, year = m_texto_es.groups()
+        mes1_num = meses.get(mes1.lower(), "")
+        mes2_num = meses.get(mes2.lower(), "")
+        if mes1_num and mes2_num:
+            year = f"20{year}" if len(year) == 2 else year
+            inicio = f"{d1.zfill(2)}/{mes1_num}/{year}"
+            fin = f"{d2.zfill(2)}/{mes2_num}/{year}"
+            return inicio, fin
+    
+    # ── PATRÓN 3: Variante "Válido desde DD mes hasta DD mes del YYYY" ────────────
+    m_valido = re.search(
+        r'válid[oa]?\s+(?:desde\s+)?el?\s+(\d{1,2})\s+(?:de\s+)?(\w+).*?'
+        r'(?:hasta\s+)?el?\s+(\d{1,2})\s+(?:de\s+)?(\w+)\s+(?:del?\s+)?(\d{2,4})',
+        texto_l
+    )
+    if m_valido:
+        d1, mes1, d2, mes2, year = m_valido.groups()
+        mes1_num = meses.get(mes1.lower(), "")
+        mes2_num = meses.get(mes2.lower(), "")
+        if mes1_num and mes2_num:
+            year = f"20{year}" if len(year) == 2 else year
+            inicio = f"{d1.zfill(2)}/{mes1_num}/{year}"
+            fin = f"{d2.zfill(2)}/{mes2_num}/{year}"
+            return inicio, fin
+    
+    # ── PATRÓN 4: Solo fecha fin "hasta DD/MM/YYYY" o "vence DD/MM/YYYY" ────────
+    m_fin_num = re.search(
+        r'(?:hasta|vence|válido\s+hasta)\s+(?:el?\s+)?(\d{1,2})[/\.\-](\d{1,2})[/\.\-](\d{2,4})',
+        texto_l
+    )
+    if m_fin_num:
+        d, m, y = m_fin_num.groups()
+        y = f"20{y}" if len(y) == 2 else y
+        fin = f"{d.zfill(2)}/{m.zfill(2)}/{y}"
+        return "", fin
+    
+    # ── PATRÓN 5: Disponible desde/hasta en formato de fecha solo mes/día ────────
+    m_mes_dia = re.search(
+        r'(?:disponible\s+)?(?:desde|del?)\s+(\d{1,2})[/\.\-](\d{1,2})\s*(?:al?|a|hasta)\s*(\d{1,2})[/\.\-](\d{1,2})',
+        texto_l
+    )
+    if m_mes_dia:
+        d1, m1, d2, m2 = m_mes_dia.groups()
+        m_year = re.search(r'(\d{4})\b', texto_l)
+        year = m_year.group(1) if m_year else "2026"
+        inicio = f"{d1.zfill(2)}/{m1.zfill(2)}/{year}"
+        fin = f"{d2.zfill(2)}/{m2.zfill(2)}/{year}"
+        return inicio, fin
+    
+    # ── PATRÓN 6: Formato "promoción del 01-10-2025 al 31-12-2025" ──────────────
+    m_del_al = re.search(
+        r'del?\s+(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})\s+al?\s+(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})',
+        texto_l
+    )
+    if m_del_al:
+        d1, m1, y1, d2, m2, y2 = m_del_al.groups()
+        y1 = f"20{y1}" if len(y1) == 2 else y1
+        y2 = f"20{y2}" if len(y2) == 2 else y2
+        inicio = f"{d1.zfill(2)}/{m1.zfill(2)}/{y1}"
+        fin = f"{d2.zfill(2)}/{m2.zfill(2)}/{y2}"
+        return inicio, fin
+    
+    # ── PATRÓN 7: "Disponible hasta el DD de mes de YYYY" (solo fecha fin) ──────
+    # Ejemplo: "Disponible hasta el 31 de marzo de 2027"
+    m_disponible_hasta = re.search(
+        r'disponible\s+hasta\s+el?\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{2,4})',
+        texto_l
+    )
+    if m_disponible_hasta:
+        d, mes, year = m_disponible_hasta.groups()
+        mes_num = meses.get(mes.lower(), "")
+        if mes_num:
+            year = f"20{year}" if len(year) == 2 else year
+            fin = f"{d.zfill(2)}/{mes_num}/{year}"
+            return "", fin
+    
+    # ── PATRÓN 8: "desde el DD de mes de YYYY" (solo fecha inicio) ──────────────
+    # Ejemplo: "desde el 29 de enero de 2026 o hasta agotar stock"
+    m_desde = re.search(
+        r'desde\s+el?\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{2,4})',
+        texto_l
+    )
+    if m_desde:
+        d, mes, year = m_desde.groups()
+        mes_num = meses.get(mes.lower(), "")
+        if mes_num:
+            year = f"20{year}" if len(year) == 2 else year
+            inicio = f"{d.zfill(2)}/{mes_num}/{year}"
+            return inicio, ""
+    
+    # ── PATRÓN 9: "del DD y DD de mes de YYYY" (dos días en mismo mes/año) ──────
+    # Ejemplo: "del 16 y 17 de febrero de 2026"
+    m_dos_dias = re.search(
+        r'del?\s+(\d{1,2})\s+y\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{2,4})',
+        texto_l
+    )
+    if m_dos_dias:
+        d1, d2, mes, year = m_dos_dias.groups()
+        mes_num = meses.get(mes.lower(), "")
+        if mes_num:
+            year = f"20{year}" if len(year) == 2 else year
+            inicio = f"{d1.zfill(2)}/{mes_num}/{year}"
+            fin = f"{d2.zfill(2)}/{mes_num}/{year}"
+            return inicio, fin
+    
+    # ── PATRÓN 10: "Promoción válida del 1 de junio 2026 al 30 de junio de 2026" ──
+    # (sin "de" en el primer mes, año solo año sin "de")
+    m_valida_del = re.search(
+        r'válida?\s+del?\s+(\d{1,2})\s+de?\s+(\w+)\s+(\d{4})\s+al?\s+(\d{1,2})\s+de\s+(\w+)\s+de\s+(\d{4})',
+        texto_l
+    )
+    if m_valida_del:
+        d1, mes1, year1, d2, mes2, year2 = m_valida_del.groups()
+        mes1_num = meses.get(mes1.lower(), "")
+        mes2_num = meses.get(mes2.lower(), "")
+        if mes1_num and mes2_num:
+            inicio = f"{d1.zfill(2)}/{mes1_num}/{year1}"
+            fin = f"{d2.zfill(2)}/{mes2_num}/{year2}"
+            return inicio, fin
+    
+    # Si nada coincidió, retorna vacío
     return "", ""
 
 

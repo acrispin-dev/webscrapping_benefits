@@ -66,7 +66,7 @@ _BOTS_NO_PRECIO = {"más info", "mas info", "más aquí", "mas aqui", "ver más"
 
 
 class FalabellaScraper(BaseScraper):
-    nombre = "Banco Falabella"
+    nombre = "FALABELLA"
     url_base = "https://www.bancofalabella.pe/promociones"
 
     def scrape(self) -> List[Promocion]:

@@ -34,7 +34,7 @@ _CAT_DISPLAY = {
 _IGNORE_CATS = {'configBeneficios', 'tyc', 'pruebas'}
 
 class RipleyScraper(BaseScraper):
-    nombre   = "Banco Ripley"
+    nombre   = "RIPLEY"
     url_base = "https://www.bancoripley.com.pe/promociones/default.html"
 
     def scrape(self) -> List[Promocion]:
@@ -111,10 +111,10 @@ class RipleyScraper(BaseScraper):
             stock = stock_num
             
         # Construir descripción con formato: promocion | fecha_inicio - fecha_fin | stock
-        descripcion_nueva = dcto_clean
+        descripcion_nueva = descripcion
         if fecha_inicio or fecha_fin:
             rango_fechas = f"{fecha_inicio} - {fecha_fin}".strip(' -')
-            descripcion_nueva = f"{dcto_clean} | {rango_fechas}"
+            descripcion_nueva = f"{descripcion} | {rango_fechas}"
         if stock:
             descripcion_nueva = f"{descripcion_nueva} | {stock}"
         
@@ -122,7 +122,7 @@ class RipleyScraper(BaseScraper):
         precio, tipo = extraer_precio_tipo_de_texto(texto_full)
         tipo = tipo or 'Beneficio'
         
-        titulo = f"{comercio}  {dcto_clean}" if dcto_clean else comercio
+        titulo = f"{comercio}  {descripcion}" if descripcion else comercio
         
         return Promocion(
             fuente=self.nombre,

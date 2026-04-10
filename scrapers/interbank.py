@@ -31,7 +31,7 @@ _UA = (
 
 
 class InterbankScraper(BaseScraper):
-    nombre = "Interbank"
+    nombre = "IBK"
     url_base = "https://interbank.pe/promociones-catalogo"
 
     def scrape(self) -> List[Promocion]:
@@ -123,11 +123,11 @@ class InterbankScraper(BaseScraper):
     # ── Detail page ───────────────────────────────────────────────────────────
 
     def _parse_detail(self, page, href: str, listing: dict) -> Optional[Promocion]:
-        """Visita la página de detalle y extrae categoría, fechas y descripción completa."""
+        """Visita la página de detalle y extrae categoría, fechas, stock y descripción completa."""
         url = _BASE + href if href.startswith("/") else href
         try:
             page.goto(url, wait_until="load", timeout=30000)
-            time.sleep(1)
+            time.sleep(1.5)  # Esperar a que cargue todo el contenido
         except PlaywrightTimeout:
             print(f"[{self.nombre}] Timeout en detalle: {url}")
             # Usar los datos del listing como fallback
@@ -139,21 +139,74 @@ class InterbankScraper(BaseScraper):
         cat_el = soup.select_one("a.a-promo-header__chips span.g-title")
         categoria = cat_el.get_text(strip=True) if cat_el else "General"
 
-        # Descripción: primer <p> del bloque principal
+        # Descripción: primer <p> del bloque principal con clase in-promo
         desc_el = soup.select_one("div.a-html-content.in-promo div.a-html-content__wrapper p")
-        descripcion = desc_el.get_text(strip=True) if desc_el else listing.get("description", "")
+        descripcion_extraida = desc_el.get_text(strip=True) if desc_el else listing.get("description", "")
 
-        # Fecha: buscar <li> que contenga "Disponible desde"
-        date_text = ""
-        for li in soup.find_all("li"):
-            txt = li.get_text(" ", strip=True)
-            if re.search(r"Disponible desde", txt, re.IGNORECASE):
-                date_text = txt
+        # ── EXTRACCIÓN DE FECHAS ──────────────────────────────────────────
+        fecha_inicio, fecha_fin = "", ""
+        
+        # Buscar fechas en múltiples ubicaciones en orden de prioridad
+        locations_to_search = []
+        
+        # 1. En la lista de condiciones (li) de la descripción principal
+        main_content = soup.select_one("div.a-html-content.in-promo div.a-html-content__wrapper")
+        if main_content:
+            for li in main_content.find_all("li"):
+                txt = li.get_text(" ", strip=True)
+                locations_to_search.append(txt)
+        
+        # 2. En la sección de Condiciones del acordión
+        for item in soup.select("div.m-accordion-item"):
+            header = item.select_one("div.m-accordion-item__header p")
+            if not header:
+                continue
+            header_txt = header.get_text(strip=True).lower()
+            if header_txt == "condiciones":
+                content = item.select_one("div.m-accordion-item__content div.a-html-content__wrapper")
+                if content:
+                    txt = content.get_text(" ", strip=True)
+                    locations_to_search.append(txt)
+                    break
+        
+        # Buscar fechas en las ubicaciones encontradas
+        for location_text in locations_to_search:
+            inicio, fin = extraer_fechas(location_text)
+            if inicio or fin:
+                fecha_inicio, fecha_fin = inicio, fin
                 break
-
-        fecha_inicio, fecha_fin = extraer_fechas(date_text)
-
-        # Condiciones: texto de los acordiones Condiciones + Restricciones
+        
+        # ── EXTRACCIÓN DE STOCK ───────────────────────────────────────────
+        stock = ""
+        
+        # Buscar stock en múltiples ubicaciones
+        stock_locations = []
+        
+        # 1. En la descripción principal
+        if main_content:
+            txt = main_content.get_text(" ", strip=True)
+            stock_locations.append(txt)
+        
+        # 2. En Condiciones
+        for item in soup.select("div.m-accordion-item"):
+            header = item.select_one("div.m-accordion-item__header p")
+            if not header:
+                continue
+            header_txt = header.get_text(strip=True).lower()
+            if header_txt in ("condiciones", "restricciones"):
+                content = item.select_one("div.m-accordion-item__content div.a-html-content__wrapper")
+                if content:
+                    txt = content.get_text(" ", strip=True)
+                    stock_locations.append(txt)
+        
+        # Buscar stock en las ubicaciones encontradas
+        for location_text in stock_locations:
+            extracted_stock = extraer_stock(location_text)
+            if extracted_stock:
+                stock = extracted_stock
+                break
+        
+        # ── EXTRACCIÓN DE CONDICIONES ───────────────────────────────────────────
         condiciones_parts = []
         for item in soup.select("div.m-accordion-item"):
             header = item.select_one("div.m-accordion-item__header p")
@@ -167,21 +220,24 @@ class InterbankScraper(BaseScraper):
         condiciones = " | ".join(condiciones_parts)
 
         comercio = listing.get("title", "")
-        dscto_value = listing.get("dscto_value", "")
-        titulo = dscto_value if dscto_value else descripcion[:80]
-        precio, tipo = extraer_precio_tipo_de_texto(f"{titulo} {descripcion}")
+        precio, tipo = extraer_precio_tipo_de_texto(descripcion_extraida)
+
+        if fecha_inicio or fecha_fin or stock:
+            print(f"[{self.nombre}] ✅ Fechas: {fecha_inicio} → {fecha_fin} | Stock: {stock}")
+        else:
+            print(f"[{self.nombre}] ⚠️ No se extrajeron fechas/stock para: {comercio}")
 
         return Promocion(
             fuente=self.nombre,
             categoria=categoria,
-            titulo=titulo,
-            descripcion=descripcion,
+            titulo=descripcion_extraida,
+            descripcion="",
             comercio=comercio,
             precio=precio,
             tipo=tipo,
             fecha_inicio=fecha_inicio,
             fecha_fin=fecha_fin,
-            stock=extraer_stock(descripcion),
+            stock=stock,
             url=url,
             imagen_url=listing.get("img", ""),
             condiciones=condiciones,
@@ -189,21 +245,19 @@ class InterbankScraper(BaseScraper):
 
     def _promo_desde_listing(self, listing: dict, url: str) -> Optional[Promocion]:
         """Fallback cuando no se puede acceder a la página de detalle."""
-        descripcion = listing.get("description", "")
-        dscto_value = listing.get("dscto_value", "")
-        titulo = dscto_value if dscto_value else descripcion[:80]
-        precio, tipo = extraer_precio_tipo_de_texto(f"{titulo} {descripcion}")
+        descripcion_extraida = listing.get("description", "")
+        precio, tipo = extraer_precio_tipo_de_texto(descripcion_extraida)
         return Promocion(
             fuente=self.nombre,
             categoria="General",
-            titulo=titulo,
-            descripcion=descripcion,
+            titulo=descripcion_extraida,
+            descripcion="",
             comercio=listing.get("title", ""),
             precio=precio,
             tipo=tipo,
             fecha_inicio="",
             fecha_fin="",
-            stock=extraer_stock(descripcion),
+            stock=extraer_stock(descripcion_extraida),
             url=url,
             imagen_url=listing.get("img", ""),
             condiciones="",

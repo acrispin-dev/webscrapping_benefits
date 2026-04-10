@@ -11,7 +11,7 @@ from scrapers.utils import extraer_precio_tipo_de_texto, extraer_stock, extraer_
 from typing import List
 
 class MovistarScraper(BaseScraper):
-    nombre = "Movistar"
+    nombre = "MOVISTAR"
     url_base = "https://www.movistar.com.pe/club-movistar"
 
     def scrape(self) -> List[Promocion]:

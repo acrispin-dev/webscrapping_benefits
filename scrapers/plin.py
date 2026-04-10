@@ -60,7 +60,7 @@ _CATEGORIAS_KW = [
 
 
 class PlinScraper(BaseScraper):
-    nombre = "Plin"
+    nombre = "PLIN"
     url_base = "https://plin.pe/promociones/"
 
     def scrape(self) -> List[Promocion]:

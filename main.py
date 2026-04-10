@@ -26,9 +26,9 @@ SCRAPERS = [
     # ScotiabankScraper(),
     # InterbankScraper(),
     # BBVAScraper(),
-    # RipleyScraper(),
+    RipleyScraper()
     # MovistarScraper(),
-    OhScraper()
+    # OhScraper()
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 

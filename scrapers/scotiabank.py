@@ -82,7 +82,7 @@ _MESES: Dict[str, str] = {
 
 
 class ScotiabankScraper(BaseScraper):
-    nombre = "Scotiabank"
+    nombre = "SCBK"
     url_base = _URL
 
     def scrape(self) -> List[Promocion]:
