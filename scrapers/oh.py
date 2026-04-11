@@ -488,9 +488,9 @@ class OhScraper(BaseScraper):
             # Buscar en todo el contenido de texto de la página
             texto_completo = soup.get_text()
             
-            # Patrón para stock: "Stock: Máximo 1,000 promociones" o variaciones
-            # Buscar las variaciones más comunes
-            patron_stock = r'(?:stock|máximo|promociones|cantidades|unidades|disponibles|cupos|canjes)[\s:]*(\d{1,5}(?:[.,]\d{3})*)'
+            # Patrón para stock: Múltiples variaciones
+            # Soporta: "Stock: 3500", "Stock de 3500", "Stock total: 3,500 unidades", "hasta agotar el stock de 1,000 unidades"
+            patron_stock = r'(?:(?:hasta\s+agotar\s+(?:el\s+)?)?stock(?:\s+total)?[\s:]*(?:de\s+)?|máximo|promociones|cantidades|unidades|disponibles|cupos|canjes)[\s:]*(\d{1,5}(?:[.,]\d{3})*)'
             match_stock = re.search(patron_stock, texto_completo, re.IGNORECASE)
             if match_stock:
                 stock_raw = match_stock.group(1)
