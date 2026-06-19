@@ -127,6 +127,11 @@ class FalabellaScraper(BaseScraper):
                 page = context.new_page()
                 self._cargar_inicio(page)
                 
+                # Partir desde el inicio de la página para el primer card del lote.
+                # Los cards siguientes usan go_back() y no necesitan este reset.
+                page.evaluate("window.scrollTo(0, 0)")
+                time.sleep(0.5)
+
                 # Procesar tarjetas del lote
                 for data_id_str in batch_ids:
                     success = False
@@ -208,25 +213,26 @@ class FalabellaScraper(BaseScraper):
         6. Repetir con el siguiente card
         """
         try:
-            # Paso 0: Resetear scroll a inicio
-            try:
-                page.evaluate("window.scrollTo(0, 0)")
-                time.sleep(0.5)
-            except Exception as e:
-                _dbg(f"_extraer_detalles: error reseteando scroll para {data_id_str}: {e}")
-            
-            # Paso 1: Scrollear lentamente hasta encontrar la tarjeta específica
-            # (mismo ritmo que en _recopilar_todas_las_tarjetas para permitir carga progresiva)
-            max_scroll_attempts = 120
+            # Paso 1: Scroll incremental desde posición actual hasta encontrar el card.
+            # No se resetea a 0: el go_back() del card anterior ya deja la página
+            # cerca de la posición correcta, por lo que el siguiente card del lote
+            # requiere poco o ningún scroll adicional.
+            max_scroll_attempts = 300
             card = None
-            
+
             for scroll_attempt in range(max_scroll_attempts):
                 card = page.query_selector(f'[data-id="{data_id_str}"]')
                 if card:
                     _dbg(f"_extraer_detalles: data-id={data_id_str} encontrado en attempt {scroll_attempt}")
                     break
-                
-                # Scrollear hacia abajo de forma incremental para permitir lazy loading
+
+                at_bottom = page.evaluate(
+                    "() => (window.scrollY + window.innerHeight) >= document.documentElement.scrollHeight - 50"
+                )
+                if at_bottom:
+                    _dbg(f"_extraer_detalles: fondo alcanzado sin encontrar data-id={data_id_str}")
+                    break
+
                 try:
                     page.evaluate("""
                         window.scrollBy(0, 600);
@@ -329,21 +335,21 @@ class FalabellaScraper(BaseScraper):
             except Exception as e:
                 _dbg(f"_extraer_detalles: error extrayendo datos para {data_id_str}: {e}")
             
-            # Paso 4: Navegar a URL base para volver al listado
+            # Paso 4: go_back() para volver al listado sin recargar la página.
+            # Preserva el DOM ya cargado y deja el scroll cerca del card actual,
+            # reduciendo drásticamente el scroll necesario para el siguiente card del lote.
             try:
-                _dbg(f"_extraer_detalles: navegando a URL base {self.url_base} para {data_id_str}")
-                # Usar wait_until="domcontentloaded" (menos restrictivo que networkidle)
-                page.goto(self.url_base, wait_until="domcontentloaded", timeout=60000)
-                time.sleep(1.0)
-                _dbg(f"_extraer_detalles: regreso a URL base completado para {data_id_str}")
+                _dbg(f"_extraer_detalles: go_back para volver al listado ({data_id_str})")
+                page.go_back(wait_until="domcontentloaded", timeout=30000)
+                time.sleep(1.2)
+                _dbg(f"_extraer_detalles: regreso completado para {data_id_str}")
             except Exception as e:
-                _dbg(f"_extraer_detalles: error navegando a URL base para {data_id_str}: {e}")
-                # Fallback: recargando con wait_until menos estricto
+                _dbg(f"_extraer_detalles: go_back falló para {data_id_str}: {e}, usando goto")
                 try:
-                    page.goto(self.url_base, wait_until="load", timeout=40000)
-                    time.sleep(1.0)
+                    page.goto(self.url_base, wait_until="domcontentloaded", timeout=60000)
+                    time.sleep(1.5)
                 except Exception as e2:
-                    _dbg(f"_extraer_detalles: fallback también falló para {data_id_str}: {e2}")
+                    _dbg(f"_extraer_detalles: goto también falló para {data_id_str}: {e2}")
             
             _dbg(f"_extraer_detalles: completado para data-id={data_id_str}")
             
