@@ -1,6 +1,7 @@
 """
 main.py — Runner principal.
-Ejecuta los scrapers habilitados y genera output/index.html
+Ejecuta los scrapers habilitados, genera output/index.html,
+exporta output/promociones.csv y lo envía por correo.
 """
 import os
 import sys
@@ -17,6 +18,8 @@ from scrapers.ripley import RipleyScraper
 from scrapers.movistar import MovistarScraper
 from scrapers.oh import OhScraper
 from html_generator import generar_html
+from importcsv import generar_csv
+from send_email import enviar_csv_por_correo
 
 # ── Lista de scrapers activos ─────────────────────────────────────────────────
 # Comenta cualquier línea para deshabilitar un scraper individual.
@@ -57,6 +60,11 @@ def main():
 
     if todas_las_promos:
         print("\n✅ Listo. Abre output/index.html en tu navegador.")
+        try:
+            ruta_csv = generar_csv()
+            enviar_csv_por_correo(ruta_csv)
+        except Exception as e:
+            print(f"[ERROR] No se pudo generar/enviar el CSV: {e}")
     else:
         print("\n⚠️  No se obtuvieron promociones. Revisa output/debug_*.html para inspeccionar las páginas.")
 
