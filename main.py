@@ -25,13 +25,13 @@ from send_email import enviar_csv_por_correo
 # Comenta cualquier línea para deshabilitar un scraper individual.
 SCRAPERS = [
     FalabellaScraper(),
-    PlinScraper(),
-    ScotiabankScraper(),
-    InterbankScraper(),
-    BBVAScraper(),
-    RipleyScraper(),
-    MovistarScraper(),
-    OhScraper()
+    #PlinScraper(),
+    #ScotiabankScraper(),
+    #InterbankScraper(),
+    #BBVAScraper(),
+    #RipleyScraper(),
+    #MovistarScraper(),
+    #OhScraper()
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 

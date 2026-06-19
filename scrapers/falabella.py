@@ -226,14 +226,14 @@ class FalabellaScraper(BaseScraper):
                     _dbg(f"_extraer_detalles: data-id={data_id_str} encontrado en attempt {scroll_attempt}")
                     break
                 
-                # Scrollear hacia abajo (mismos parámetros que recopilar)
+                # Scrollear hacia abajo de forma incremental para permitir lazy loading
                 try:
                     page.evaluate("""
-                        window.scrollTo(0, document.documentElement.scrollHeight);
+                        window.scrollBy(0, 600);
                         var nextDiv = document.getElementById('__next');
-                        if(nextDiv) { nextDiv.scrollTop = nextDiv.scrollHeight; }
+                        if(nextDiv) { nextDiv.scrollTop += 600; }
                     """)
-                    time.sleep(0.5)  # IMPORTANTE: esperar tiempo suficiente para cargas
+                    time.sleep(0.6)
                 except Exception:
                     pass
             
@@ -245,14 +245,25 @@ class FalabellaScraper(BaseScraper):
             try:
                 page.evaluate(f"""
                     const card = document.querySelector('[data-id="{data_id_str}"]');
-                    if (card) {{ card.scrollIntoView({{ behavior: 'smooth', block: 'center' }}); }}
+                    if (card) {{ card.scrollIntoView({{ behavior: 'instant', block: 'center' }}); }}
                 """)
-                time.sleep(1.0)  # Esperar a que se centre en viewport
-                
+                time.sleep(1.5)  # dar tiempo al render tras el scroll
+
+                locator = page.locator(f'[data-id="{data_id_str}"]')
+                try:
+                    locator.wait_for(state="visible", timeout=8000)
+                except Exception:
+                    # segundo intento de scroll si aún no es visible
+                    page.evaluate(f"""
+                        const card = document.querySelector('[data-id="{data_id_str}"]');
+                        if (card) {{ card.scrollIntoView({{ behavior: 'instant', block: 'center' }}); }}
+                    """)
+                    time.sleep(1.5)
+
                 _dbg(f"_extraer_detalles: haciendo click en data-id={data_id_str}")
-                page.locator(f'[data-id="{data_id_str}"]').click(timeout=5000)
-                time.sleep(2.0)  # Esperar a que navegue a página de detalle
-                
+                locator.click(timeout=10000)
+                time.sleep(2.0)
+
             except Exception as e:
                 _dbg(f"_extraer_detalles: error en click/navegación para {data_id_str}: {e}")
                 return
@@ -458,11 +469,11 @@ class FalabellaScraper(BaseScraper):
                     break
 
             page.evaluate("""
-                window.scrollTo(0, document.documentElement.scrollHeight);
+                window.scrollBy(0, 600);
                 var nextDiv = document.getElementById('__next');
-                if(nextDiv) { nextDiv.scrollTop = nextDiv.scrollHeight; }
+                if(nextDiv) { nextDiv.scrollTop += 600; }
             """)
-            time.sleep(0.5)
+            time.sleep(0.6)
             step += 1
 
         return tarjetas
