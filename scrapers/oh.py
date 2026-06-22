@@ -26,6 +26,10 @@ class OhScraper(BaseScraper):
     
     # URLs de cada categoría
     CATEGORIAS = {
+        "Lunes de pollo": "/lunes-de-pollo",
+        "Arequipa": "/arequipa",
+        "Cusco": "/cusco",
+        "Trujillo": "/trujillo",
         "Restaurantes": "/promociones-y-descuentos/restaurantes-view",
         "Fast Food": "/promociones-y-descuentos/fast-food",
         "Moda y belleza": "/promociones-y-descuentos/moda-belleza",
@@ -356,7 +360,7 @@ class OhScraper(BaseScraper):
                 print(f"[{self.nombre}] Timeout esperando h1.oh-text-headline-md, continuando...")
                 pass
             
-            time.sleep(1.5)  # Esperar 1.5 segundos adicionales para que cargue completamente la página
+            time.sleep(2.0)  # esperar renderizado Angular completo
             
             html = page.content()
             soup = BeautifulSoup(html, "lxml")
@@ -484,20 +488,56 @@ class OhScraper(BaseScraper):
             else:
                 print(f"[{self.nombre}] No se encontró div.promotion__characteristics")
             
-            # EXTRACTOR 4: Stock desde expansion-item o características
-            # Buscar en todo el contenido de texto de la página
-            texto_completo = soup.get_text()
-            
-            # Patrón para stock: Múltiples variaciones
-            # Soporta: "Stock: 3500", "Stock de 3500", "Stock total: 3,500 unidades", "hasta agotar el stock de 1,000 unidades"
-            patron_stock = r'(?:(?:hasta\s+agotar\s+(?:el\s+)?)?stock(?:\s+total)?[\s:]*(?:de\s+)?|máximo|promociones|cantidades|unidades|disponibles|cupos|canjes)[\s:]*(\d{1,5}(?:[.,]\d{3})*)'
-            match_stock = re.search(patron_stock, texto_completo, re.IGNORECASE)
-            if match_stock:
-                stock_raw = match_stock.group(1)
-                # Limpiar formato (remover separadores de miles)
-                stock = re.sub(r'[,.\s]', '', stock_raw)
-                print(f"[{self.nombre}] Stock encontrado: {stock}")
-            else:
+            # EXTRACTOR 4: Stock desde la sección de Términos y condiciones
+            # Primero intentamos el texto rico del expansion-item de términos;
+            # si no está, usamos el texto completo como fallback.
+            texto_terminos = ""
+            for item in soup.select('oh-expansion-item, [class*="expansion-item"]'):
+                if 'término' in item.get_text(separator=' ').lower():
+                    texto_terminos = item.get_text(separator=' ')
+                    break
+            if not texto_terminos:
+                texto_terminos = soup.get_text(separator=' ')
+
+            # Representa un número con o sin separador de miles (, o .)
+            _NUM = r'(\d{1,3}(?:[.,]\d{3})+|\d{3,6})'
+
+            # Patrones ordenados del más específico al más general
+            _STOCK_PATTERNS = [
+                # "Stock: Máximo 1,000 promociones" / "stock de 500"
+                rf'stock[\s:]*(?:total[\s:]*)?(?:m[aá]ximo\s+)?(?:de\s+)?{_NUM}',
+                # "Máximo 1,000 [unidades/cupos/…]"
+                rf'm[aá]ximo\s+(?:de\s+)?{_NUM}',
+                # "1,000 unidades" / "500 cupos" (número ANTES de la palabra clave)
+                rf'{_NUM}\s+(?:unidades|cupos|canjes|usos|promociones|transacciones|vouchers?|vauchers?)',
+                # "primeras/os 500 unidades/canjes/…"
+                rf'primer[oa]s?\s+{_NUM}\s+(?:unidades|cupos|canjes|usos|transacciones|compras)',
+                # "hasta agotar stock de 1,000"
+                rf'hasta\s+agotar\s+(?:el\s+)?stock\s+(?:de\s+)?{_NUM}',
+            ]
+
+            for pat in _STOCK_PATTERNS:
+                for m in re.finditer(pat, texto_terminos, re.IGNORECASE):
+                    raw = m.group(1)
+                    # Un número con separador de miles (ej. "2,000") nunca es un año
+                    tiene_separador = bool(re.search(r'[.,]\d{3}', raw))
+                    num_str = re.sub(r'[,.\s]', '', raw)
+                    try:
+                        num = int(num_str)
+                        # Filtrar años (2000-2100) solo si NO tienen separador de miles
+                        # "2026" sin separador → año → descartar
+                        # "2,000" con separador → stock → conservar
+                        es_anio = (2000 <= num <= 2100) and not tiene_separador
+                        if 100 <= num <= 999999 and not es_anio:
+                            stock = str(num)
+                            print(f"[{self.nombre}] Stock encontrado: {stock}")
+                            break
+                    except ValueError:
+                        continue
+                if stock:
+                    break
+
+            if not stock:
                 print(f"[{self.nombre}] No se encontró stock")
             
             print(f"[{self.nombre}] Detalles extraídos: Comercio={comercio}, Fecha Inicio={fecha_inicio}, Fecha Fin={fecha_fin}, Stock={stock}")
